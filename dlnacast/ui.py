@@ -4,6 +4,7 @@ import re
 import socket
 import threading
 import asyncio
+import concurrent.futures
 import time
 import traceback
 from dataclasses import dataclass
@@ -12,10 +13,12 @@ from typing import Dict, List, Optional, Tuple
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
 
 from . import __version__  # noqa: E402
 from . import guncelleme  # noqa: E402
+from . import kucukresim  # noqa: E402
 from .bridge import AsyncBridge, to_ui  # noqa: E402
 from .controlpoint import LOCAL_ID, LOCAL_PLAYER_ID, ControlPoint, DeviceInfo, Entry, PlayStatus  # noqa: E402
 from .config import load_config, save_config  # noqa: E402
@@ -54,6 +57,11 @@ CSS = b"""
             padding: 10px 10px 10px 16px; margin: 16px; }
 .bildirim.hata { background-color: rgba(176, 40, 40, 0.96); }
 .bildirim button { color: white; }
+.kare { border-radius: 10px; background-color: alpha(currentColor, 0.07); }
+.kare picture { border-radius: 10px; }
+.karo { border-radius: 12px; padding: 6px; }
+.calan-karo .kare { box-shadow: 0 0 0 3px @theme_selected_bg_color; }
+.rozet { background-color: rgba(0, 0, 0, 0.6); color: white; border-radius: 999px; padding: 4px; margin: 6px; }
 .adim { font-weight: bold; min-width: 26px; min-height: 26px; border-radius: 999px;
         background-color: alpha(currentColor, 0.1); }
 """
@@ -155,6 +163,49 @@ class Row(Gtk.ListBoxRow):
         else:
             self.remove_css_class("calan-satir")
             self.icon.set_from_icon_name(self.base_icon)
+
+
+class Tile(Gtk.FlowBoxChild):
+    """Izgara görünümündeki kare: küçük resim (ya da simge) ve altında ad."""
+
+    W, H = 168, 112
+
+    def __init__(self, ent: Entry, icon: str) -> None:
+        super().__init__(css_classes=["karo"])
+        self.data = ent
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        frame = Gtk.Overlay(css_classes=["kare"], overflow=Gtk.Overflow.HIDDEN)
+        frame.set_size_request(self.W, self.H)
+        self.icon = Gtk.Image(icon_name=icon, pixel_size=44, css_classes=["soluk"],
+                              halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        frame.set_child(self.icon)
+        self.pic = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, visible=False)
+        frame.add_overlay(self.pic)
+        self.badge = Gtk.Image(icon_name="audio-volume-high-symbolic", visible=False,
+                               css_classes=["rozet"], halign=Gtk.Align.END, valign=Gtk.Align.START)
+        frame.add_overlay(self.badge)
+        if not ent.is_container and is_playable(ent):
+            frame.add_overlay(Gtk.Image(icon_name="media-playback-start-symbolic", css_classes=["rozet"],
+                                        halign=Gtk.Align.START, valign=Gtk.Align.END))
+        box.append(frame)
+        label = Gtk.Label(label=ent.title, wrap=True, wrap_mode=2, lines=2, ellipsize=3,
+                          justify=Gtk.Justification.CENTER, max_width_chars=18,
+                          width_chars=18, css_classes=["kucuk"])
+        box.append(label)
+        self.set_child(box)
+        self.set_tooltip_text(ent.title)
+
+    def set_thumb(self, texture: Gdk.Texture) -> None:
+        self.pic.set_paintable(texture)
+        self.pic.set_visible(True)
+        self.icon.set_visible(False)
+
+    def set_playing(self, on: bool) -> None:
+        self.badge.set_visible(on)
+        if on:
+            self.add_css_class("calan-karo")
+        else:
+            self.remove_css_class("calan-karo")
 
 
 DEVICE_LOOK = {  # tür -> (simge, açıklama)
@@ -490,6 +541,11 @@ class MainWindow(Gtk.ApplicationWindow):
         topbar = Gtk.Box(spacing=8, margin_top=10, margin_bottom=6, margin_start=12, margin_end=16)
         topbar.append(self.back_btn)
         topbar.append(titles)
+        self.grid_mode = self.config.get("gorunum", "izgara") == "izgara"
+        self.view_btn = Gtk.Button(css_classes=["flat"])
+        self.view_btn.connect("clicked", lambda *_: self.toggle_view())
+        self._update_view_btn()
+        topbar.append(self.view_btn)
         topbar.append(self.play_all_btn)
 
         self.item_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)  # çalan satır ayrıca vurgulanır
@@ -497,8 +553,20 @@ class MainWindow(Gtk.ApplicationWindow):
         self.item_list.connect("row-activated", self.on_entry_activated)
         liste = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["icerik"])
         liste.append(topbar)
-        liste.append(Gtk.ScrolledWindow(child=self.item_list, vexpand=True,
-                                        hscrollbar_policy=Gtk.PolicyType.NEVER))
+        self.flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                                activate_on_single_click=True, valign=Gtk.Align.START,
+                                max_children_per_line=30, min_children_per_line=2,
+                                column_spacing=6, row_spacing=6, margin_start=10, margin_end=10,
+                                margin_bottom=10)
+        self.flow.connect("child-activated", lambda _f, tile: self.on_entry_activated(None, tile))
+        self.items_stack = Gtk.Stack(vexpand=True)
+        self.items_stack.add_named(Gtk.ScrolledWindow(child=self.item_list,
+                                                      hscrollbar_policy=Gtk.PolicyType.NEVER), "liste")
+        self.items_stack.add_named(Gtk.ScrolledWindow(child=self.flow,
+                                                      hscrollbar_policy=Gtk.PolicyType.NEVER), "izgara")
+        liste.append(self.items_stack)
+        self._thumbs = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        self._thumb_gen = 0
 
         welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                           valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
@@ -689,6 +757,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mserver.stop()
         self.cp.player.close()
         self.cp.cast.close()
+        self._thumb_gen += 1
+        self._thumbs.shutdown(wait=False, cancel_futures=True)
         return False
 
     def open_shares(self) -> None:
@@ -784,6 +854,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.search_spinner.set_visible(True)
         self.search_spinner.start()
         self.set_status("Ağdaki cihazlar aranıyor…")
+        self.cp.cast_hosts = list(self.config.get("cast_hosts", []))
         self.bridge.submit(
             self.cp.discover(lambda info: to_ui(self.add_device, info)),
             on_done=self.discovery_done,
@@ -817,6 +888,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.refresh_btn.set_sensitive(True)
         self.search_spinner.stop()
         self.search_spinner.set_visible(False)
+        hosts = self.cp.cast.known_hosts()  # Chromecast IP'leri: sonraki açılışta doğrudan denenir
+        if hosts and set(hosts) - set(self.config.get("cast_hosts", [])):
+            self.config["cast_hosts"] = (hosts + [h for h in self.config.get("cast_hosts", [])
+                                                  if h not in hosts])[:8]
+            save_config(self.config)
         others = len(self.renderers) - 1  # ilki her zaman "Bu bilgisayar"
         want = self._want_renderer
         if want is None:  # ilk acilis: agda TV/Chromecast varsa varsayilan hedef o olsun
@@ -876,9 +952,36 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def show_entries(self, entries: List[Entry]) -> None:
         clear(self.item_list)
+        while (child := self.flow.get_first_child()) is not None:
+            self.flow.remove(child)
+        old_rows = self.queue_rows
         self.entries = entries
         self.entry_rows = []
         self._playing_row = None
+        if self.grid_mode and entries:
+            self._fill_grid(entries)
+        else:
+            self._fill_list(entries)
+        # kuyruk aynı klasördeyse yeni çizilen kareleri/satırları ona bağla
+        by_entry = {id(w.data): w for w in self.entry_rows}
+        self.queue_rows = [by_entry.get(id(r.data), r) if r is not None else None for r in old_rows]
+        if 0 <= self.queue_idx < len(self.queue_rows):
+            cur = self.queue_rows[self.queue_idx]
+            if cur is not None and cur.get_parent() is not None:
+                cur.set_playing(True)
+                self._playing_row = cur
+        self._finish_entries(entries)
+
+    def _fill_grid(self, entries: List[Entry]) -> None:
+        self.items_stack.set_visible_child_name("izgara")
+        for e in entries:
+            tile = Tile(e, entry_icon(e))
+            self.flow.append(tile)
+            self.entry_rows.append(tile)
+        self._load_thumbs(list(self.entry_rows), self.view_local)
+
+    def _fill_list(self, entries: List[Entry]) -> None:
+        self.items_stack.set_visible_child_name("liste")
         for e in entries:
             if e.is_container:
                 trailing = Gtk.Image(icon_name="go-next-symbolic", css_classes=["soluk"])
@@ -892,6 +995,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 trailing.connect("clicked", lambda _b, r=row: self.on_entry_activated(self.item_list, r))
             self.item_list.append(row)
             self.entry_rows.append(row)
+
+    def _finish_entries(self, entries: List[Entry]) -> None:
         self.spinner.stop()
         folders = sum(1 for e in entries if e.is_container)
         playable = sum(1 for e in entries if is_playable(e))
@@ -1266,6 +1371,49 @@ class MainWindow(Gtk.ApplicationWindow):
             self.show_error(exc)
             return
         self.close()
+
+    # ---- ızgara ve küçük resimler ----
+    def _update_view_btn(self) -> None:
+        self.view_btn.set_icon_name("view-list-symbolic" if self.grid_mode else "view-grid-symbolic")
+        self.view_btn.set_tooltip_text("Liste görünümüne geç" if self.grid_mode
+                                       else "Küçük resimli ızgara görünümüne geç")
+
+    def toggle_view(self) -> None:
+        self.grid_mode = not self.grid_mode
+        self.config["gorunum"] = "izgara" if self.grid_mode else "liste"
+        save_config(self.config)
+        self._update_view_btn()
+        if self.view_stack.get_visible_child_name() == "liste":
+            self.show_entries(self.entries)
+
+    def _load_thumbs(self, tiles: List[Tile], local: bool) -> None:
+        """Küçük resimleri arka planda sırayla yükler; klasör değişirse eski işler bırakılır."""
+        self._thumb_gen += 1
+        gen = self._thumb_gen
+        for tile in tiles:
+            e = tile.data
+            if e.is_container or (not local and not e.thumb):
+                continue
+            self._thumbs.submit(self._thumb_job, gen, tile, e, local)
+
+    def _thumb_job(self, gen: int, tile: Tile, e: Entry, local: bool) -> None:
+        if gen != self._thumb_gen:
+            return  # başka klasöre geçildi
+        try:
+            if local:
+                path = kucukresim.from_local(e.id, audio=entry_icon(e) == "audio-x-generic-symbolic")
+            else:
+                path = kucukresim.from_url(e.thumb)
+            if not path:
+                return
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, Tile.W * 2, Tile.H * 2, True)
+        except Exception:  # noqa: BLE001  (resim yoksa simge kalır)
+            return
+        to_ui(self._set_thumb, gen, tile, pix)
+
+    def _set_thumb(self, gen: int, tile: Tile, pix) -> None:
+        if gen == self._thumb_gen and tile.get_parent() is not None:
+            tile.set_thumb(Gdk.Texture.new_for_pixbuf(pix))
 
     # ---- kısayol, sürükle-bırak, ayar ----
     def _key(self, _widget, _args, fn) -> bool:

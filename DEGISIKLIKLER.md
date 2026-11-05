@@ -1,5 +1,10 @@
 # Değişiklikler
 
+## 0.6.0
+- Klasörler ve sunucular küçük resimli ızgara olarak açılır: albüm kapakları, sunucunun küçük resimleri, bilgisayardaki videolardan bir kare. Sağ üstteki düğmeyle listeye geçebilirsin.
+- Chromecast daha güvenilir: TV bulunur bulunmaz bağlanılır, bağlantı yenilemede kopmaz, olmazsa kendiliğinden bir kez yeniden bağlanır.
+- TV'nin ağ adresi hatırlanır; arama duyuruyu kaçırsa bile TV listede çıkar.
+
 ## 0.5.0
 - Müzik artık program içinde çalar: "Bu bilgisayar" seçiliyken mp3, flac gibi dosyalar ayrı pencere açmadan çalar; alttaki panelden yönetilir.
 - Videolar eskisi gibi kendi penceresinde açılır.

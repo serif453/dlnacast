@@ -43,6 +43,7 @@ class Entry:
     uri: Optional[str] = None
     mime: Optional[str] = None
     upnp_class: str = ""
+    thumb: Optional[str] = None  # küçük resim adresi (albüm kapağı ya da sunucunun ürettiği)
 
 
 @dataclass
@@ -83,6 +84,13 @@ def parse_didl(xml_text: str) -> List[Entry]:
                 parts = res.get("protocolInfo", "").split(":")
                 mime = parts[2] if len(parts) > 2 else None
                 break
+        thumb = (el.findtext("upnp:albumArtURI", default="", namespaces=NS) or "").strip() or None
+        if thumb is None:  # bazı sunucular küçük resmi ayrı bir image/* <res> olarak verir
+            for res in el.findall("d:res", NS):
+                parts = res.get("protocolInfo", "").split(":")
+                if len(parts) > 2 and parts[2].startswith("image/") and (res.text or "").strip():
+                    thumb = res.text.strip()
+                    break
         entries.append(
             Entry(
                 id=el.get("id", ""),
@@ -91,6 +99,7 @@ def parse_didl(xml_text: str) -> List[Entry]:
                 uri=uri,
                 mime=mime,
                 upnp_class=el.findtext("upnp:class", default="", namespaces=NS),
+                thumb=thumb,
             )
         )
     return entries
@@ -118,6 +127,7 @@ class ControlPoint:
         self.local_media = None  # ayni surecteki MediaServer
         self.player = LocalPlayer()  # bu bilgisayarda oynatma (mpv)
         self.errors: List[str] = []  # son aramadaki uyarilar
+        self.cast_hosts: List[str] = []  # bilinen Chromecast IP'leri (arayüz config'ten verir)
 
     def _ensure(self) -> None:
         if self._factory is None:  # aiohttp oturumu çalışan döngüde oluşmalı
@@ -154,7 +164,7 @@ class ControlPoint:
 
     async def _discover_cast(self, on_found: Callable[[DeviceInfo], None], timeout: int) -> None:
         try:
-            for name, key in await self.cast.discover(timeout):
+            for name, key in await self.cast.discover(self.cast_hosts):
                 on_found(DeviceInfo(name, key, "cast"))
         except ImportError:
             print("pychromecast kurulu degil, Chromecast atlandi.", file=sys.stderr)
