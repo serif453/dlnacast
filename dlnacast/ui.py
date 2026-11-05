@@ -242,6 +242,9 @@ def friendly_error(exc: BaseException) -> str:
         return "Cihaz yanıt vermedi. Açık ve aynı ağda olduğundan emin olup tekrar dene."
     if isinstance(exc, (ConnectionError, OSError)) or "Connect" in name or "Communication" in name:
         return "Cihaza ulaşılamadı. Açık ve aynı ağda olduğundan emin ol, sonra yenile düğmesine bas."
+    if "Failed to execute" in text or name in ("RequestFailed", "ControllerNotRegistered"):
+        return ("Cihaz bu komutu şu an kabul etmedi. Çalan bir şey olmayabilir; "
+                "listeden bir video seçip tekrar dene.")
     if "Upnp" in name:
         return f"Cihaz bu isteği kabul etmedi ({text or name}). Dosya türünü desteklemiyor olabilir."
     if isinstance(exc, RuntimeError) and text:
@@ -629,13 +632,18 @@ class MainWindow(Gtk.ApplicationWindow):
         box.append(player)
         self.set_child(box)
 
-        keys = Gtk.ShortcutController(propagation_phase=Gtk.PropagationPhase.CAPTURE)
-        for trigger, fn in (("space", self.toggle_play), ("Left", lambda: self.skip(-SKIP_SECONDS)),
-                            ("Right", lambda: self.skip(SKIP_SECONDS)), ("BackSpace", self.go_back),
-                            ("<Control>o", self.open_file), ("F5", self.refresh)):
-            keys.add_shortcut(Gtk.Shortcut(trigger=Gtk.ShortcutTrigger.parse_string(trigger),
-                                           action=Gtk.CallbackAction.new(self._key, fn)))
-        self.add_controller(keys)
+        # Boşluk vb. her yerde çalışsın (CAPTURE); ok tuşları ise önce odaktaki
+        # ses/ilerleme çubuğuna gitsin, onlar kullanmazsa sarma yapsın (BUBBLE).
+        for phase, pairs in (
+                (Gtk.PropagationPhase.CAPTURE, (("space", self.toggle_play), ("BackSpace", self.go_back),
+                                                ("<Control>o", self.open_file), ("F5", self.refresh))),
+                (Gtk.PropagationPhase.BUBBLE, (("Left", lambda: self.skip(-SKIP_SECONDS)),
+                                               ("Right", lambda: self.skip(SKIP_SECONDS))))):
+            keys = Gtk.ShortcutController(propagation_phase=phase)
+            for trigger, fn in pairs:
+                keys.add_shortcut(Gtk.Shortcut(trigger=Gtk.ShortcutTrigger.parse_string(trigger),
+                                               action=Gtk.CallbackAction.new(self._key, fn)))
+            self.add_controller(keys)
         drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
         drop.connect("drop", self.on_drop)
         self.add_controller(drop)
@@ -1091,12 +1099,16 @@ class MainWindow(Gtk.ApplicationWindow):
         """Çalıyorsa duraklatır, değilse devam ettirir; kuyruk hiç başlamadıysa ilk öğeyi başlatır."""
         if self._state in ("PLAYING", "TRANSITIONING"):
             self.send_control("pause")
-        elif self._state in ("STOPPED", "NO_MEDIA_PRESENT", "") and self.queue and self.queue_idx < 0:
-            self.start_item(0)
-        elif self._state in ("STOPPED", "NO_MEDIA_PRESENT", "") and self.queue_idx >= 0 and self._user_stopped:
-            self.start_item(self.queue_idx)
-        else:
+        elif self._state == "PAUSED_PLAYBACK":
             self.send_control("resume")
+        elif self.queue:  # durmuş ya da bitmiş: sıradaki/aynı videoyu yeniden başlat
+            self.start_item(max(0, self.queue_idx))
+        else:
+            self.show_toast("Önce listeden oynatmak istediğin videoyu seç.")
+
+    def _has_media(self) -> bool:
+        """Seçili cihazda şu an çalan ya da duraklatılmış bir şey var mı?"""
+        return self._state in ("PLAYING", "PAUSED_PLAYBACK", "TRANSITIONING")
 
     def _set_state(self, state: str) -> None:
         self._state = state
@@ -1110,14 +1122,18 @@ class MainWindow(Gtk.ApplicationWindow):
         if target is None:
             self.set_status("Önce üstteki \"Şurada oynat\" düğmesinden bir cihaz seç.")
             return
-        new = max(0.0, self._pos + delta)
-        if self._dur > 0:
-            new = min(new, max(0.0, self._dur - 1))
+        if not self._has_media() or self._dur <= 0:
+            self.set_status("Şu an çalan bir şey yok; önce bir video oynat.")
+            return
+        new = min(max(0.0, self._pos + delta), max(0.0, self._dur - 1))
         self._pos = new
         self._seek_touch = time.monotonic()
         self.seek_scale.set_value(new)
         self.pos_label.set_text(fmt_time(new))
-        self.bridge.submit(self.cp.seek(target.location, new), on_error=self.show_error)
+        # Tuşa art arda basılırsa her basışta komut gönderme; durunca tek sarma yap.
+        if self._seek_src:
+            GLib.source_remove(self._seek_src)
+        self._seek_src = GLib.timeout_add(500, self._do_seek, new)
 
     def on_seek_changed(self, _scale, _scroll, value: float) -> bool:
         """Kullanıcı çubuğu kaydırırken çalışır; son değeri 0.4 sn bekleyip gönderir."""

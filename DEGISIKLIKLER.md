@@ -1,5 +1,10 @@
 # Değişiklikler
 
+## 0.4.1
+- Düzeltme: çalan bir şey yokken ok tuşlarına basınca "Failed to execute seek" hatası çıkıyordu; artık sadece hatırlatma yapılır.
+- Ok tuşuna art arda basınca tek bir sarma komutu gönderilir; ses çubuğu ok tuşlarıyla yine ayarlanabilir.
+- Boşluk tuşu: kuyruk boşsa "önce video seç" der, durmuş videoyu yeniden başlatır.
+
 ## 0.4.0
 - Başlığın ortasında büyük "Şurada oynat" düğmesi: cihazlar simgeleriyle (TV, Chromecast, bu bilgisayar) listelenir.
 - Hatalar ekranda sade Türkçe bildirim olarak çıkar; açtığın klasörler artık hatırlanır (✕ ile listeden kaldırılır).
