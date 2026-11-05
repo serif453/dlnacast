@@ -1,5 +1,10 @@
 # Değişiklikler
 
+## 0.5.0
+- Müzik artık program içinde çalar: "Bu bilgisayar" seçiliyken mp3, flac gibi dosyalar ayrı pencere açmadan çalar; alttaki panelden yönetilir.
+- Videolar eskisi gibi kendi penceresinde açılır.
+- Güvenlik: ağdaki sunuculardan gelen adresler bu bilgisayarda çalınmadan önce denetlenir.
+
 ## 0.4.1
 - Düzeltme: çalan bir şey yokken ok tuşlarına basınca "Failed to execute seek" hatası çıkıyordu; artık sadece hatırlatma yapılır.
 - Ok tuşuna art arda basınca tek bir sarma komutu gönderilir; ses çubuğu ok tuşlarıyla yine ayarlanabilir.

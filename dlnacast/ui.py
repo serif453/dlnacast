@@ -158,7 +158,7 @@ class Row(Gtk.ListBoxRow):
 
 
 DEVICE_LOOK = {  # tür -> (simge, açıklama)
-    "player": ("computer-symbolic", "Bu bilgisayarda mpv ile oynatır"),
+    "player": ("computer-symbolic", "Müzik program içinde çalar, video ayrı pencerede açılır"),
     "cast": ("video-display-symbolic", "Chromecast"),
     "renderer": ("video-display-symbolic", "Televizyon / DLNA cihazı"),
 }

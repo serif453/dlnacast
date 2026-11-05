@@ -1,7 +1,8 @@
 """Bu bilgisayarda oynatma: mpv'yi IPC soketiyle yönetir.
 
 DLNA sunucusundan gelen adresleri ve yerel dosyaları doğrudan oynatır.
-mpv bir kez açılır (--idle), sonraki parçalar aynı pencerede `loadfile` ile yüklenir.
+mpv bir kez açılır (--idle), sonraki parçalar `loadfile` ile yüklenir.
+Müzik penceresiz çalar (program içinden yönetilir); video için mpv penceresi açılır.
 """
 import asyncio
 import json
@@ -10,6 +11,17 @@ import shutil
 import subprocess
 import tempfile
 from typing import List, Optional, Tuple
+from urllib.parse import unquote, urlsplit
+
+AUDIO_EXT = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".wma", ".alac", ".ape"}
+
+
+def is_audio(uri: str, mime: Optional[str] = None) -> bool:
+    """Adres/MIME türüne göre müzik mi? (bilinmiyorsa video sayılır, pencere açılır)"""
+    if mime:
+        return mime.lower().startswith("audio/")
+    path = unquote(urlsplit(uri).path) if "://" in uri else uri
+    return os.path.splitext(path)[1].lower() in AUDIO_EXT
 
 
 class LocalPlayer:
@@ -39,7 +51,7 @@ class LocalPlayer:
         except FileNotFoundError:
             pass
         self._proc = subprocess.Popen(
-            [exe, "--idle=yes", "--force-window=yes", "--keep-open=no", "--ytdl=no",
+            [exe, "--idle=yes", "--force-window=no", "--keep-open=no", "--ytdl=no",
              f"--title={self._title}", f"--input-ipc-server={self._sock}"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -100,6 +112,10 @@ class LocalPlayer:
     # ---- oynatma ----
     async def play(self, uri: str, mime: Optional[str] = None, title: str = "") -> None:
         await self._ensure()
+        audio = is_audio(uri, mime)
+        # Müzik: pencere açılmaz, görüntü (kapak resmi) kapalı. Video: mpv penceresi.
+        await self._do("set_property", "force-window", "no" if audio else "yes")
+        await self._do("set_property", "vid", "no" if audio else "auto")
         await self._do("set_property", "force-media-title", title or "")
         await self._do("loadfile", uri, "replace")
         await self._do("set_property", "pause", False)

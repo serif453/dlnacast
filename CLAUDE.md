@@ -30,7 +30,8 @@ Testler (GTK ve mpv gerekmez, sahte oynatıcı kullanır):
 - `controlpoint.py` – `ControlPoint`: SSDP keşfi, ContentDirectory gezintisi, AVTransport/RenderingControl ile renderer kontrolü. Hedef türüne göre yönlendirir: mpv, Chromecast veya DLNA renderer.
 - `mediaserver.py` – kendi UPnP MediaServer'ı (SSDP duyurusu + ContentDirectory SOAP + dosya akıtma). Sadece standart kütüphane.
 - `localserver.py` – yerel dosyaları HTTP ile sunar (Range + CORS). `mediaserver` handler'ını buradan türetir. `lan_ip()` ve `guess_mime()` de burada.
-- `localplayer.py` – "Bu bilgisayar" hedefi: mpv'yi `--idle` ile bir kez açar, IPC soketiyle yönetir.
+- `localplayer.py` – "Bu bilgisayar" hedefi: mpv'yi `--idle --force-window=no` ile bir kez açar, IPC soketiyle yönetir. Müzik (`is_audio`: MIME ya da uzantı) penceresiz çalar (`force-window=no`, `vid=no`); video için her yüklemede `force-window=yes`, `vid=auto` yapılır. `ControlPoint.play` bu hedefe sadece http(s) ya da var olan yerel dosya gönderir (`check_local_uri`).
+  Bulutta gerçek mpv denemesi: `apt-get install mpv x11-utils`, `MPV_HOME` içinde `ao=null`; Xvfb'de video çıkışı çalışmaz (eski kodda da), ama pencerenin açılıp açılmadığı `xwininfo -root -tree` ile görülür.
 - `renderer.py` – `MediaRenderer`: DLNA alıcı (renderer). Ağdaki telefon/bilgisayar bu programı "TV" gibi görür; AVTransport + RenderingControl + ConnectionManager servislerini sunar, oynatmayı kendi `LocalPlayer` (ayrı mpv penceresi) ile yapar. Arayüzde başlık çubuğundaki "Alıcı" anahtarıyla açılır/kapanır, açık/kapalı durumu config'de saklanır.
 - `cast.py` – `CastManager`: pychromecast ile keşif ve oynatma. Engelleyici çağrılar thread havuzunda çalışır.
 - `bridge.py` – `AsyncBridge`: asyncio döngüsünü ayrı thread'de çalıştırır, sonuçları `to_ui()` ile GTK ana thread'ine taşır.

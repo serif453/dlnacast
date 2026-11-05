@@ -1,5 +1,6 @@
 """UPnP/DLNA control point: cihaz keşfi, ContentDirectory gezintisi, renderer kontrolü."""
 import asyncio
+import os
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -93,6 +94,18 @@ def parse_didl(xml_text: str) -> List[Entry]:
             )
         )
     return entries
+
+
+def check_local_uri(uri: str) -> None:
+    """Bu bilgisayarda oynatılacak adresi denetler: sadece http(s) ya da var olan yerel dosya.
+
+    Ağdaki bir sunucu kötü niyetle mpv'nin özel adreslerini (av://, edl:// ...) gönderemesin.
+    """
+    if uri.lower().startswith(("http://", "https://")):
+        return
+    if os.path.isabs(uri) and os.path.isfile(uri):
+        return
+    raise RuntimeError("Bu adres bu bilgisayarda oynatılamaz (sadece ağ adresleri ve yerel dosyalar).")
 
 
 class ControlPoint:
@@ -198,6 +211,7 @@ class ControlPoint:
     async def play(self, renderer_location: str, uri: str,
                    mime: Optional[str] = None, title: str = "") -> None:
         if renderer_location == LOCAL_PLAYER_ID:
+            check_local_uri(uri)
             await self.player.play(uri, mime, title)
             return
         if self.cast.has(renderer_location):
