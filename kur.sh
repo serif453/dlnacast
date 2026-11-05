@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # DLNA Cast kurulum ve güncelleme betiği.
 #
-#   İlk kurulum (terminale yapıştır):
-#     bash <(curl -fsSL https://raw.githubusercontent.com/serif453/dlnacast/main/kur.sh)
+#   İlk kurulum (terminale yapıştır; fish ve bash'te çalışır):
+#     curl -fsSL https://raw.githubusercontent.com/serif453/dlnacast/main/kur.sh -o /tmp/kur.sh
+#     bash /tmp/kur.sh
 #
 #   Güncelleme: uygulama menüsünden "DLNA Cast Güncelle" ya da programdaki "Güncelle" düğmesi.
 #

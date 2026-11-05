@@ -3,10 +3,11 @@
 Linux için DLNA/UPnP programı: ağdaki sunucuları gezer, seçilen cihazda (TV, Chromecast, bu bilgisayar) oynatır, kendi klasörlerini ağa paylaşır ve bu bilgisayarı ağdaki telefon/bilgisayarlara "TV" olarak gösterir.
 
 ## Kurulum (tek komut)
-Terminali aç (Konsole), şu satırı yapıştır ve Enter'a bas:
+Terminali aç (Konsole), şu iki satırı sırayla yapıştırıp Enter'a bas (fish ve bash'te çalışır):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/serif453/dlnacast/main/kur.sh)
+curl -fsSL https://raw.githubusercontent.com/serif453/dlnacast/main/kur.sh -o /tmp/kur.sh
+bash /tmp/kur.sh
 ```
 
 Eksik sistem paketi (GTK4, PyGObject, mpv) varsa şifren istenir ve kurulur. Bitince program uygulama menüsünde **DLNA Cast** adıyla görünür; ondan sonra hep tıklayarak açarsın.

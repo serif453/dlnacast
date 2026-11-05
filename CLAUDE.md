@@ -6,6 +6,7 @@ Linux için DLNA/UPnP programı: ağdaki sunucuları gezer, seçilen cihazda (TV
 - Kullanıcı Türkçe yazar. Cevapları, açıklamaları, commit mesajlarını ve kod yorumlarını Türkçe yaz.
 - Yazılım bilgisi sıfır, tam acemi. Her şeyi adım adım, sade dille anlat. Terminal komutlarını tam ve kopyalanabilir ver, ne işe yaradığını bir cümleyle açıkla.
 - Sistem: CachyOS (Arch tabanlı), KDE Plasma, Wayland. Paket kurulumu `pacman` ile (`apt` değil).
+- Kullanıcının kabuğu **fish**. Verdiğin komutlar fish'te çalışmalı: `<(...)`, `$(...)` gibi bash'e özel yazımlar kullanma; gerekirse `bash -c '...'` ya da önce dosyaya indirip `bash dosya.sh` kullan.
 - Büyük değişiklikten önce ne yapacağını kısaca söyle, sonra yap. Kullanıcı kodu okuyup denetleyemez; bu yüzden değişiklikten sonra nasıl deneyeceğini de yaz.
 
 ## Çalıştırma
