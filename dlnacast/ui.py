@@ -2,6 +2,7 @@
 import os
 import re
 import socket
+import threading
 import time
 import traceback
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
+from . import __version__  # noqa: E402
+from . import guncelleme  # noqa: E402
 from .bridge import AsyncBridge, to_ui  # noqa: E402
 from .controlpoint import LOCAL_ID, LOCAL_PLAYER_ID, ControlPoint, DeviceInfo, Entry, PlayStatus  # noqa: E402
 from .config import load_config, save_config  # noqa: E402
@@ -163,7 +166,7 @@ class SharesWindow(Gtk.Window):
 
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app: Gtk.Application) -> None:
-        super().__init__(application=app, title="DLNA Cast")
+        super().__init__(application=app, title=f"DLNA Cast {__version__}")
         self.set_default_size(1040, 640)
         self.bridge = AsyncBridge()
         self.cp = ControlPoint()
@@ -227,6 +230,9 @@ class MainWindow(Gtk.ApplicationWindow):
             valign=Gtk.Align.CENTER,
             tooltip_text="Açıkken telefon ve bilgisayarlar bu bilgisayarı TV gibi görür; "
                          "gönderdikleri video/müzik burada oynar (DLNA renderer)")
+        self.update_btn = Gtk.Button(label="Güncelle", visible=False, css_classes=["suggested-action"])
+        self.update_btn.connect("clicked", lambda *_: self.start_update())
+        header.pack_end(self.update_btn)
         header.pack_end(self.renderer_switch)
         header.pack_end(Gtk.Label(label="Alıcı:"))
         self.renderer_model = Gtk.StringList()
@@ -317,6 +323,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.renderer_switch.set_active(True)
         self.refresh()
         GLib.timeout_add_seconds(POLL_SECONDS, self.poll)
+        threading.Thread(target=self._check_update, daemon=True).start()
 
     def on_renderer_switch(self, switch: Gtk.Switch, _pspec) -> None:
         """Alıcı anahtarı: açınca ağda 'TV' olarak duyurulur, kapatınca kaybolur."""
@@ -804,6 +811,30 @@ class MainWindow(Gtk.ApplicationWindow):
         if len(self.stack) > 1:
             self.stack.pop()
             self.load_current()
+
+    # ---- güncelleme ----
+    def _check_update(self) -> None:
+        """GitHub'da yeni sürüm var mı bakar (arka planda; ağ yoksa sessizce geçer)."""
+        try:
+            yeni = guncelleme.yeni_surum_var()
+        except Exception:  # noqa: BLE001  (çevrimdışı olmak hata değil)
+            return
+        if yeni:
+            to_ui(self._show_update, yeni)
+
+    def _show_update(self, yeni: str) -> None:
+        self.update_btn.set_label(f"Güncelle ({yeni})")
+        self.update_btn.set_tooltip_text(f"Kurulu sürüm {__version__}. Tıklayınca {yeni} indirilir, "
+                                         "program kapanıp güncellendikten sonra yeniden açılır.")
+        self.update_btn.set_visible(True)
+
+    def start_update(self) -> None:
+        try:
+            guncelleme.guncelleyiciyi_baslat()
+        except Exception as exc:  # noqa: BLE001
+            self.show_error(exc)
+            return
+        self.close()
 
     # ---- yardımcılar ----
     def set_status(self, text: str) -> None:

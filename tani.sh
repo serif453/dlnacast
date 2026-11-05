@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
-cd "$(dirname "$0")"
-.venv/bin/python -m dlnacast.tani
+# Teşhis aracı: paylaşım ve cihaz keşfi zincirini adım adım sınar.
+D="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+cd "$D" && exec "$D/.venv/bin/python" -m dlnacast.tani
