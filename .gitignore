@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+yedek*/
+yedekler/
+*.tar.gz
+*.zip

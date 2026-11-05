@@ -1,0 +1,824 @@
+"""GTK4 arayüzü: solda sunucular, sağda klasör içeriği, üstte hedef renderer seçimi."""
+import os
+import re
+import socket
+import time
+import traceback
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gio, GLib, Gtk  # noqa: E402
+
+from .bridge import AsyncBridge, to_ui  # noqa: E402
+from .controlpoint import LOCAL_ID, LOCAL_PLAYER_ID, ControlPoint, DeviceInfo, Entry, PlayStatus  # noqa: E402
+from .config import load_config, save_config  # noqa: E402
+from .localserver import LocalServer, guess_mime  # noqa: E402
+from .mediaserver import MediaServer  # noqa: E402
+from .renderer import MediaRenderer  # noqa: E402
+
+SKIP_SECONDS = 10
+POLL_SECONDS = 1
+VOLUME_EVERY = 10  # ses değerini kaç yoklamada bir oku
+SETTLE_SECONDS = 3.0  # yeni parça başlatıldıktan sonra eski durum bilgisini yok say
+END_TOLERANCE = 6.0  # parça bitmeden bu kadar saniye önce durduysa "bitti" sayılmaz
+
+
+def fmt_time(seconds: float) -> str:
+    s = int(max(0, seconds))
+    h, m, sec = s // 3600, s % 3600 // 60, s % 60
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def natural_key(text: str) -> list:
+    """"bolum2" < "bolum10" olacak şekilde sıralama anahtarı."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", text)]
+
+
+@dataclass
+class QueueItem:
+    title: str
+    uri: Optional[str] = None  # DLNA sunucusundan gelen adres
+    mime: Optional[str] = None
+    path: Optional[str] = None  # yerel dosya (oynatılırken ağa açılır)
+
+
+def is_playable(e: Entry) -> bool:
+    if e.is_container or not e.uri:
+        return False
+    if (e.mime or "").startswith("image/") or "imageItem" in e.upnp_class:
+        return False
+    return True
+
+
+def local_media_files(folder: str) -> List[str]:
+    """Klasördeki video/ses dosyaları (alt klasörler hariç), doğal sırayla."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    files = []
+    for n in names:
+        p = os.path.join(folder, n)
+        if n.startswith(".") or not os.path.isfile(p):
+            continue
+        if guess_mime(p).split("/")[0] in ("video", "audio"):
+            files.append(p)
+    files.sort(key=lambda p: natural_key(os.path.basename(p)))
+    return files
+
+
+def local_entries(folder: str) -> List[Entry]:
+    """Klasörün içeriği: önce alt klasörler, sonra video/ses dosyaları (doğal sırada)."""
+    try:
+        names = os.listdir(folder)
+    except OSError as exc:
+        raise RuntimeError(f"Klasör okunamadı: {exc}") from exc
+    dirs, files = [], []
+    for n in names:
+        if n.startswith("."):
+            continue
+        p = os.path.join(folder, n)
+        if os.path.isdir(p):
+            dirs.append(p)
+        elif os.path.isfile(p) and guess_mime(p).split("/")[0] in ("video", "audio"):
+            files.append(p)
+
+    def key(p: str) -> list:
+        return natural_key(os.path.basename(p))
+
+    out = [Entry(id=p, title=os.path.basename(p), is_container=True) for p in sorted(dirs, key=key)]
+    out += [Entry(id=p, title=os.path.basename(p), is_container=False,
+                  uri="file://" + p, mime=guess_mime(p)) for p in sorted(files, key=key)]
+    return out
+
+
+class Row(Gtk.ListBoxRow):
+    def __init__(self, text: str, data) -> None:
+        super().__init__()
+        self.data = data
+        label = Gtk.Label(label=text, xalign=0, margin_top=8, margin_bottom=8,
+                          margin_start=12, margin_end=12, ellipsize=3)
+        self.set_child(label)
+
+
+def clear(listbox: Gtk.ListBox) -> None:
+    while (child := listbox.get_first_child()) is not None:
+        listbox.remove(child)
+
+
+class SharesWindow(Gtk.Window):
+    """Paylaşılan klasörleri gösterir; ekleme/kaldırma yapar."""
+
+    def __init__(self, parent: "MainWindow") -> None:
+        super().__init__(title="Paylaşılan klasörler", transient_for=parent, modal=True)
+        self.parent_win = parent
+        self.set_default_size(520, 360)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                      margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        info = Gtk.Label(xalign=0, wrap=True,
+                         label="Buradaki klasörler ağdaki TV, telefon ve diğer cihazlara açılır.")
+        box.append(info)
+        self.listbox = Gtk.ListBox(vexpand=True)
+        box.append(Gtk.ScrolledWindow(child=self.listbox, vexpand=True))
+        add = Gtk.Button(label="Klasör ekle…")
+        add.connect("clicked", lambda *_: self.add_folder())
+        box.append(add)
+        self.set_child(box)
+        self.fill()
+
+    def fill(self) -> None:
+        clear(self.listbox)
+        for path in self.parent_win.config["shares"]:
+            row = Gtk.Box(spacing=8, margin_top=4, margin_bottom=4, margin_start=8, margin_end=8)
+            row.append(Gtk.Label(label=path, xalign=0, hexpand=True, ellipsize=3))
+            btn = Gtk.Button(label="Kaldır")
+            btn.connect("clicked", lambda _b, p=path: self.remove(p))
+            row.append(btn)
+            self.listbox.append(row)
+
+    def add_folder(self) -> None:
+        dialog = Gtk.FileDialog(title="Paylaşılacak klasörü seç")
+        dialog.select_folder(self, None, self.on_folder)
+
+    def on_folder(self, dialog, result) -> None:
+        try:
+            gfile = dialog.select_folder_finish(result)
+        except GLib.Error:
+            return
+        path = gfile.get_path()
+        shares = self.parent_win.config["shares"]
+        if path and path not in shares:
+            shares.append(path)
+            self.parent_win.shares_changed()
+            self.fill()
+
+    def remove(self, path: str) -> None:
+        self.parent_win.config["shares"].remove(path)
+        self.parent_win.shares_changed()
+        self.fill()
+
+
+class MainWindow(Gtk.ApplicationWindow):
+    def __init__(self, app: Gtk.Application) -> None:
+        super().__init__(application=app, title="DLNA Cast")
+        self.set_default_size(1040, 640)
+        self.bridge = AsyncBridge()
+        self.cp = ControlPoint()
+        self.local = LocalServer()
+
+        self.servers: List[DeviceInfo] = []
+        self.renderers: List[DeviceInfo] = []
+        self.current_server: Optional[DeviceInfo] = None
+        self.stack: List[Tuple[str, str]] = []  # (object_id, başlık)
+        self.entries: List[Entry] = []  # görüntülenen klasörün içeriği
+        self.entry_rows: List[Row] = []
+        self.view_local = False  # sağ liste diskten mi geliyor (yoksa DLNA sunucusundan mı)
+        self.session_dirs: List[str] = []  # bu oturumda açılan klasörler
+        self._local_rows: Dict[str, Row] = {}
+        self._want_renderer: Optional[str] = None  # yenilemeden once secili hedef
+        self._sel_guard = False  # True iken liste/secim degisimi kullanici secimi sayilmaz
+        self._discovering = False  # arama surerken durum yoklamasi durur
+
+        # Kuyruk
+        self.queue: List[QueueItem] = []
+        self.queue_idx = -1
+        self.queue_rows: List[Optional[Row]] = []  # kuyruk öğesine karşılık gelen liste satırı
+
+        # Oynatma durumu
+        self._polling = False
+        self._poll_n = 0
+        self._pos = 0.0
+        self._dur = 0.0
+        self._seek_src = 0
+        self._vol_src = 0
+        self._seek_touch = 0.0  # kullanıcının son kaydırma zamanı
+        self._vol_touch = 0.0
+        self._was_playing = False  # bu parça şu ana kadar çalıştı/duraklatıldı mı
+        self._user_stopped = False  # kullanıcı Durdur'a bastı mı
+        self._last_pos = 0.0
+        self._last_dur = 0.0
+        self._play_t0 = 0.0
+
+        # Başlık çubuğu
+        header = Gtk.HeaderBar()
+        self.set_titlebar(header)
+        self.refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Cihazları ara")
+        self.refresh_btn.connect("clicked", lambda *_: self.refresh())
+        header.pack_start(self.refresh_btn)
+        open_btn = Gtk.Button(icon_name="document-open-symbolic",
+                              tooltip_text="Bilgisayardan dosya(lar) seç ve sırayla oynat")
+        open_btn.connect("clicked", lambda *_: self.open_file())
+        header.pack_start(open_btn)
+        folder_btn = Gtk.Button(icon_name="folder-open-symbolic",
+                                tooltip_text="Bilgisayardan klasör aç: videolar listelenir, birini seçip TV'ye gönder")
+        folder_btn.connect("clicked", lambda *_: self.play_local_folder())
+        header.pack_start(folder_btn)
+        share_btn = Gtk.Button(label="Klasör paylaş", tooltip_text="Klasörleri ağa aç (media server)")
+        share_btn.connect("clicked", lambda *_: SharesWindow(self).present())
+        header.pack_start(share_btn)
+        self.back_btn = Gtk.Button(icon_name="go-previous-symbolic", sensitive=False,
+                                   tooltip_text="Geri")
+        self.back_btn.connect("clicked", lambda *_: self.go_back())
+        header.pack_start(self.back_btn)
+        self.renderer_switch = Gtk.Switch(
+            valign=Gtk.Align.CENTER,
+            tooltip_text="Açıkken telefon ve bilgisayarlar bu bilgisayarı TV gibi görür; "
+                         "gönderdikleri video/müzik burada oynar (DLNA renderer)")
+        header.pack_end(self.renderer_switch)
+        header.pack_end(Gtk.Label(label="Alıcı:"))
+        self.renderer_model = Gtk.StringList()
+        self.renderer_drop = Gtk.DropDown(model=self.renderer_model)
+        self.renderer_drop.connect("notify::selected", lambda *_: self.on_renderer_changed())
+        header.pack_end(self.renderer_drop)
+        header.pack_end(Gtk.Label(label="Oynat:"))
+        self.play_all_btn = Gtk.Button(label="▶ Tümünü oynat",
+                                       tooltip_text="Açık klasördeki tüm videoları baştan sırayla oynat")
+        self.play_all_btn.connect("clicked", lambda *_: self.play_all())
+        header.pack_end(self.play_all_btn)
+
+        # Gövde
+        self.dev_list = Gtk.ListBox()
+        self.dev_list.connect("row-activated", self.on_server_activated)
+        self.item_list = Gtk.ListBox()
+        self.item_list.connect("row-activated", self.on_entry_activated)
+
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=280, vexpand=True)
+        paned.set_start_child(Gtk.ScrolledWindow(child=self.dev_list))
+        paned.set_end_child(Gtk.ScrolledWindow(child=self.item_list))
+
+        # İlerleme çubuğu
+        self.pos_label = Gtk.Label(label="0:00", width_chars=7, xalign=1)
+        self.dur_label = Gtk.Label(label="0:00", width_chars=7, xalign=0)
+        self.seek_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
+        self.seek_scale.set_draw_value(False)
+        self.seek_scale.set_hexpand(True)
+        self.seek_scale.set_sensitive(False)
+        self.seek_scale.connect("change-value", self.on_seek_changed)
+        seekbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                          margin_start=12, margin_end=12, margin_top=4)
+        seekbox.append(self.pos_label)
+        seekbox.append(self.seek_scale)
+        seekbox.append(self.dur_label)
+
+        # Alt çubuk: durum + düğmeler + ses
+        self.status = Gtk.Label(xalign=0, hexpand=True, margin_start=12,
+                                margin_top=6, margin_bottom=6, ellipsize=3)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                      margin_end=12, margin_top=4, margin_bottom=4)
+        bar.append(self.status)
+
+        def add_btn(icon: str, tip: str, fn) -> Gtk.Button:
+            btn = Gtk.Button(icon_name=icon, tooltip_text=tip)
+            btn.connect("clicked", lambda _b: fn())
+            bar.append(btn)
+            return btn
+
+        self.prev_btn = add_btn("media-skip-backward-symbolic", "Önceki", self.prev_item)
+        add_btn("media-seek-backward-symbolic", f"{SKIP_SECONDS} sn geri",
+                lambda: self.skip(-SKIP_SECONDS))
+        add_btn("media-playback-pause-symbolic", "Duraklat", lambda: self.send_control("pause"))
+        add_btn("media-playback-start-symbolic", "Devam", lambda: self.send_control("resume"))
+        add_btn("media-playback-stop-symbolic", "Durdur", lambda: self.send_control("stop"))
+        add_btn("media-seek-forward-symbolic", f"{SKIP_SECONDS} sn ileri",
+                lambda: self.skip(SKIP_SECONDS))
+        self.next_btn = add_btn("media-skip-forward-symbolic", "Sonraki", self.next_item)
+        self.prev_btn.set_sensitive(False)
+        self.next_btn.set_sensitive(False)
+        self.autonext = Gtk.CheckButton(label="Otomatik sonraki", active=True,
+                                        tooltip_text="Parça bitince sıradakine geç")
+        bar.append(self.autonext)
+        bar.append(Gtk.Image.new_from_icon_name("audio-volume-high-symbolic"))
+        self.vol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.vol_scale.set_draw_value(False)
+        self.vol_scale.set_size_request(120, -1)
+        self.vol_scale.set_value(50)
+        self.vol_scale.connect("change-value", self.on_volume_changed)
+        bar.append(self.vol_scale)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(paned)
+        box.append(seekbox)
+        box.append(bar)
+        self.set_child(box)
+
+        self.config = load_config()
+        self.mserver = MediaServer(f"DLNA Cast ({socket.gethostname()})", self.config["uuid"])
+        self.cp.local_media = self.mserver
+        self.renderer = MediaRenderer(f"DLNA Cast Alıcı ({socket.gethostname()})",
+                                      self.config["renderer_uuid"], self.bridge.loop)
+        self.renderer.on_message = lambda text: to_ui(self.set_status, text)
+        self.renderer_switch.connect("notify::active", self.on_renderer_switch)
+        self.connect("close-request", self.on_close)
+        self.shares_changed(save=False)
+        if self.config["renderer"]:  # son seferde açıksa yine aç
+            self.renderer_switch.set_active(True)
+        self.refresh()
+        GLib.timeout_add_seconds(POLL_SECONDS, self.poll)
+
+    def on_renderer_switch(self, switch: Gtk.Switch, _pspec) -> None:
+        """Alıcı anahtarı: açınca ağda 'TV' olarak duyurulur, kapatınca kaybolur."""
+        want = switch.get_active()
+        if want == self.renderer.running:
+            return
+        if want:
+            try:
+                self.renderer.start()
+            except Exception as exc:  # noqa: BLE001
+                switch.set_active(False)
+                self.show_error(exc)
+                return
+            self.set_status(f"Alıcı açık: ağda \"{self.renderer.name}\" adıyla görünür.")
+        else:
+            self.renderer.stop()
+            self.set_status("Alıcı kapatıldı.")
+        self.config["renderer"] = want
+        save_config(self.config)
+
+    def on_close(self, *_args) -> bool:
+        self.renderer.stop()
+        self.mserver.stop()
+        self.cp.player.close()
+        self.cp.cast.close()
+        return False
+
+    def shares_changed(self, save: bool = True) -> None:
+        if save:
+            save_config(self.config)
+        self.mserver.set_shares(self.config["shares"])
+        if save:
+            self.sync_local_rows()
+        if self.mserver.shares and not self.mserver.running:
+            try:
+                self.mserver.start()
+            except Exception as exc:  # noqa: BLE001
+                self.show_error(exc)
+                return
+        if save:
+            self.set_status(f"{len(self.mserver.shares)} klasör paylaşılıyor. "
+                            "Listede görünmesi için yenile düğmesine bas.")
+
+    def local_dirs(self) -> List[str]:
+        out: List[str] = []
+        for p in list(self.config.get("shares", [])) + self.session_dirs:
+            if p not in out and os.path.isdir(p):
+                out.append(p)
+        return out
+
+    def sync_local_rows(self) -> None:
+        """Paylaşılan ve açılan klasörleri sol listede gösterir (diskten gezilir)."""
+        wanted = self.local_dirs()
+        for p in list(self._local_rows):
+            if p not in wanted:
+                self.dev_list.remove(self._local_rows.pop(p))
+        for p in wanted:
+            if p not in self._local_rows:
+                name = os.path.basename(p.rstrip(os.sep)) or p
+                row = Row("💻  " + name, DeviceInfo(name, p, "localdir"))
+                row.set_tooltip_text(p)
+                self.dev_list.append(row)
+                self._local_rows[p] = row
+
+    def selected_renderer(self) -> Optional[DeviceInfo]:
+        idx = self.renderer_drop.get_selected()
+        if not self.renderers or idx >= len(self.renderers):
+            return None
+        return self.renderers[idx]
+
+    # ---- keşif ----
+    def refresh(self) -> None:
+        prev = self.selected_renderer()
+        self._want_renderer = prev.location if prev else None
+        self._discovering = True
+        self.servers.clear()
+        self.renderers.clear()
+        self.entries = []
+        self.entry_rows = []
+        clear(self.dev_list)
+        clear(self.item_list)
+        self._sel_guard = True
+        try:
+            self.renderer_model.splice(0, self.renderer_model.get_n_items(), [])
+            self.renderers.append(DeviceInfo("Bu bilgisayar (mpv)", LOCAL_PLAYER_ID, "player"))
+            self.renderer_model.append("Bu bilgisayar (mpv)")
+        finally:
+            self._sel_guard = False
+        self._local_rows = {}
+        self.sync_local_rows()  # paylaşılan ve açılan klasörler diskten listelenir
+        self.refresh_btn.set_sensitive(False)
+        self.set_status("Cihazlar aranıyor…")
+        self.bridge.submit(
+            self.cp.discover(lambda info: to_ui(self.add_device, info)),
+            on_done=self.discovery_done,
+            on_error=self.discovery_failed,
+        )
+
+    def add_device(self, info: DeviceInfo) -> None:
+        if (info.kind == "server" and self.mserver.running
+                and info.location == self.mserver.location):
+            return  # kendi paylasimimiz zaten "Bu bilgisayar" olarak listede
+        if (info.kind == "renderer" and self.renderer.running
+                and info.location == self.renderer.location):
+            return  # kendi alicimiz: "Bu bilgisayar (mpv)" zaten var
+        if info.kind == "server":
+            self.servers.append(info)
+            self.dev_list.append(Row("📁  " + info.name, info))
+        else:
+            if any(r.location == info.location for r in self.renderers):
+                return
+            self.renderers.append(info)
+            suffix = "  (Chromecast)" if info.kind == "cast" else ""
+            self.renderer_model.append(info.name + suffix)
+            if info.location == self._want_renderer:  # yenilemeden onceki hedef geri geldi
+                self._sel_guard = True
+                try:
+                    self.renderer_drop.set_selected(len(self.renderers) - 1)
+                finally:
+                    self._sel_guard = False
+
+    def discovery_done(self, count: int) -> None:
+        self._discovering = False
+        self.refresh_btn.set_sensitive(True)
+        others = len(self.renderers) - 1  # ilki her zaman "Bu bilgisayar"
+        want = self._want_renderer
+        if want is None:  # ilk acilis: agda TV/Chromecast varsa varsayilan hedef o olsun
+            if others > 0 and self.renderer_drop.get_selected() == 0:
+                self.renderer_drop.set_selected(1)
+        lost = (want not in (None, LOCAL_PLAYER_ID)
+                and not any(r.location == want for r in self.renderers))
+        msg = f"{len(self.servers)} sunucu, {others} ağ renderer'ı bulundu (+ bu bilgisayar)."
+        if lost:
+            msg += "  ⚠ önceki hedef cihaz bulunamadı, Bu bilgisayar seçili"
+        if self.cp.errors:
+            msg += f"  ⚠ {len(self.cp.errors)} uyarı (ayrıntı terminalde; tani.sh çalıştır)"
+        self.set_status(msg)
+
+    def discovery_failed(self, exc: Exception) -> None:
+        self._discovering = False
+        self.show_error(exc)
+
+    # ---- gezinme ----
+    def on_server_activated(self, _lb, row: Row) -> None:
+        if row.data.kind == "localdir":
+            self.open_local(row.data.location)
+            return
+        self.view_local = False
+        self.current_server = row.data
+        self.stack = [("0", row.data.name)]
+        self.load_current()
+
+    def open_local(self, folder: str) -> None:
+        """Bilgisayardaki bir klasörün içeriğini doğrudan diskten listeler."""
+        self.view_local = True
+        self.stack = [(folder, os.path.basename(folder.rstrip(os.sep)) or folder)]
+        self.load_current()
+
+    def load_current(self) -> None:
+        object_id, title = self.stack[-1]
+        self.back_btn.set_sensitive(len(self.stack) > 1)
+        if self.view_local:  # object_id burada klasör yolu
+            try:
+                self.show_entries(local_entries(object_id))
+            except Exception as exc:  # noqa: BLE001
+                self.show_error(exc)
+            return
+        self.set_status(f"{title} yükleniyor…")
+        self.bridge.submit(
+            self.cp.browse(self.current_server.location, object_id),
+            on_done=self.show_entries,
+            on_error=self.show_error,
+        )
+
+    def show_entries(self, entries: List[Entry]) -> None:
+        clear(self.item_list)
+        self.entries = entries
+        self.entry_rows = []
+        for e in entries:
+            icon = "📂" if e.is_container else "▶"
+            row = Row(f"{icon}  {e.title}", e)
+            self.item_list.append(row)
+            self.entry_rows.append(row)
+        path = " / ".join(t for _, t in self.stack)
+        playable = sum(1 for e in entries if is_playable(e))
+        self.set_status(f"{path}  ({len(entries)} öğe, {playable} oynatılabilir)")
+
+    def on_entry_activated(self, _lb, row: Row) -> None:
+        e: Entry = row.data
+        if e.is_container:
+            self.stack.append((e.id, e.title))
+            self.load_current()
+            return
+        if self.selected_renderer() is None:
+            self.set_status("Önce bir renderer bulunmalı.")
+            return
+        if not e.uri:
+            self.set_status("Bu öğenin oynatılabilir adresi yok.")
+            return
+        # Tıklanan öğeden başlayarak klasörün tamamı kuyruğa girer.
+        items: List[QueueItem] = []
+        rows: List[Optional[Row]] = []
+        start = 0
+        if is_playable(e):
+            for ent, r in zip(self.entries, self.entry_rows):
+                if r is row:
+                    start = len(items)
+                if is_playable(ent):
+                    items.append(self.make_item(ent))
+                    rows.append(r)
+        else:  # örn. resim: tek başına oynat
+            items, rows = [self.make_item(e)], [row]
+        self.set_queue(items, rows)
+        self.start_item(start)
+
+    def make_item(self, ent: Entry) -> QueueItem:
+        if self.view_local:  # yerel dosya: oynatılırken ağa açılır
+            return QueueItem(ent.title, path=ent.id)
+        return QueueItem(ent.title, uri=ent.uri, mime=ent.mime)
+
+    def play_all(self) -> None:
+        """Açık klasördeki tüm oynatılabilir öğeleri baştan sırayla oynatır."""
+        if self.selected_renderer() is None:
+            self.set_status("Önce bir renderer bulunmalı.")
+            return
+        items, rows = [], []
+        for ent, r in zip(self.entries, self.entry_rows):
+            if is_playable(ent):
+                items.append(self.make_item(ent))
+                rows.append(r)
+        if not items:
+            self.set_status("Bu klasörde oynatılabilir öğe yok.")
+            return
+        self.set_queue(items, rows)
+        self.start_item(0)
+
+    # ---- yerel dosya / klasör ----
+    def _media_filters(self) -> Gio.ListStore:
+        flt = Gtk.FileFilter()
+        flt.set_name("Video ve ses")
+        flt.add_mime_type("video/*")
+        flt.add_mime_type("audio/*")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(flt)
+        return filters
+
+    def open_file(self) -> None:
+        if self.selected_renderer() is None:
+            self.set_status("Önce bir renderer bulunmalı (yenile düğmesine bas).")
+            return
+        dialog = Gtk.FileDialog(title="Oynatılacak dosya(lar)ı seç")
+        dialog.set_filters(self._media_filters())
+        dialog.open_multiple(self, None, self.on_files_chosen)
+
+    def on_files_chosen(self, dialog, result) -> None:
+        try:
+            model = dialog.open_multiple_finish(result)
+        except GLib.Error:
+            return  # iptal edildi
+        paths = []
+        for i in range(model.get_n_items()):
+            p = model.get_item(i).get_path()
+            if p:
+                paths.append(p)
+        self.queue_local(sorted(paths, key=lambda p: natural_key(os.path.basename(p))))
+
+    def play_local_folder(self) -> None:
+        dialog = Gtk.FileDialog(title="Videolarına göz atılacak klasörü seç")
+        dialog.select_folder(self, None, self.on_local_folder)
+
+    def on_local_folder(self, dialog, result) -> None:
+        try:
+            gfile = dialog.select_folder_finish(result)
+        except GLib.Error:
+            return
+        folder = gfile.get_path()
+        if not folder:
+            return
+        if folder not in self.session_dirs:
+            self.session_dirs.append(folder)
+        self.sync_local_rows()
+        self.open_local(folder)
+
+    def queue_local(self, paths: List[str]) -> None:
+        if not paths:
+            return
+        items = [QueueItem(os.path.basename(p), path=p) for p in paths]
+        self.set_queue(items, [None] * len(items))
+        self.start_item(0)
+
+    # ---- kuyruk ----
+    def set_queue(self, items: List[QueueItem], rows: List[Optional[Row]]) -> None:
+        self.queue = items
+        self.queue_rows = rows
+        self.queue_idx = -1
+
+    def update_nav_buttons(self) -> None:
+        self.prev_btn.set_sensitive(self.queue_idx > 0)
+        self.next_btn.set_sensitive(0 <= self.queue_idx < len(self.queue) - 1)
+
+    def start_item(self, idx: int) -> None:
+        if not 0 <= idx < len(self.queue):
+            return
+        target = self.selected_renderer()
+        if target is None:
+            self.set_status("Önce bir renderer bulunmalı.")
+            return
+        item = self.queue[idx]
+        if item.path and target.location == LOCAL_PLAYER_ID:
+            uri, mime = item.path, guess_mime(item.path)  # bu bilgisayarda: ağa açmaya gerek yok
+        elif item.path:  # yerel dosya: şimdi ağa aç
+            try:
+                uri = self.local.add_file(item.path)
+            except Exception as exc:  # noqa: BLE001
+                self.show_error(exc)
+                return
+            mime = guess_mime(item.path)
+        else:
+            uri, mime = item.uri, item.mime
+        self.queue_idx = idx
+        self._was_playing = False
+        self._user_stopped = False
+        self._last_pos = self._last_dur = 0.0
+        self._play_t0 = time.monotonic()
+        self.reset_playback_ui()
+        self.update_nav_buttons()
+        row = self.queue_rows[idx] if idx < len(self.queue_rows) else None
+        if row is not None and row.get_parent() is not None:  # klasör hâlâ ekranda
+            self.item_list.select_row(row)
+        where = f"{idx + 1}/{len(self.queue)}" if len(self.queue) > 1 else ""
+        self.set_status(f"{target.name} • {where} {item.title}".replace("•  ", "• "))
+        self.bridge.submit(self.cp.play(target.location, uri, mime, item.title),
+                           on_error=self.show_error)
+
+    def next_item(self) -> None:
+        if self.queue_idx + 1 < len(self.queue):
+            self.start_item(self.queue_idx + 1)
+        else:
+            self.set_status("Kuyruğun sonu.")
+
+    def prev_item(self) -> None:
+        if self.queue_idx > 0:
+            self.start_item(self.queue_idx - 1)
+
+    def maybe_advance(self) -> None:
+        """Parça kendiliğinden bittiyse sıradakine geç."""
+        if self._user_stopped or not self.autonext.get_active():
+            return
+        if self._last_dur > 0 and self._last_pos < self._last_dur - END_TOLERANCE:
+            return  # ortada durmuş (uzaktan kumanda vb.), bitmiş sayma
+        if self.queue_idx + 1 >= len(self.queue):
+            if len(self.queue) > 1:
+                self.set_status("Kuyruk bitti.")
+            return
+        self.start_item(self.queue_idx + 1)
+
+    # ---- oynatma kontrolleri ----
+    def send_control(self, cmd: str) -> None:
+        target = self.selected_renderer()
+        if target is None:
+            self.set_status("Önce bir renderer seçilmeli.")
+            return
+        if cmd == "stop":
+            self._user_stopped = True
+        elif cmd == "resume":
+            self._user_stopped = False
+        self.bridge.submit(self.cp.control(target.location, cmd), on_error=self.show_error)
+
+    def skip(self, delta: float) -> None:
+        target = self.selected_renderer()
+        if target is None:
+            self.set_status("Önce bir renderer seçilmeli.")
+            return
+        new = max(0.0, self._pos + delta)
+        if self._dur > 0:
+            new = min(new, max(0.0, self._dur - 1))
+        self._pos = new
+        self._seek_touch = time.monotonic()
+        self.seek_scale.set_value(new)
+        self.pos_label.set_text(fmt_time(new))
+        self.bridge.submit(self.cp.seek(target.location, new), on_error=self.show_error)
+
+    def on_seek_changed(self, _scale, _scroll, value: float) -> bool:
+        """Kullanıcı çubuğu kaydırırken çalışır; son değeri 0.4 sn bekleyip gönderir."""
+        self._seek_touch = time.monotonic()
+        self.pos_label.set_text(fmt_time(value))
+        if self._seek_src:
+            GLib.source_remove(self._seek_src)
+        self._seek_src = GLib.timeout_add(400, self._do_seek, value)
+        return False
+
+    def _do_seek(self, value: float) -> bool:
+        self._seek_src = 0
+        target = self.selected_renderer()
+        if target is not None:
+            value = max(0.0, min(value, self._dur)) if self._dur > 0 else max(0.0, value)
+            self._pos = value
+            self.bridge.submit(self.cp.seek(target.location, value), on_error=self.show_error)
+        return False
+
+    def on_volume_changed(self, _scale, _scroll, value: float) -> bool:
+        self._vol_touch = time.monotonic()
+        if self._vol_src:
+            GLib.source_remove(self._vol_src)
+        self._vol_src = GLib.timeout_add(250, self._do_volume, value)
+        return False
+
+    def _do_volume(self, value: float) -> bool:
+        self._vol_src = 0
+        target = self.selected_renderer()
+        if target is not None:
+            self.bridge.submit(self.cp.set_volume(target.location, int(value)),
+                               on_error=self.show_error)
+        return False
+
+    def on_renderer_changed(self) -> None:
+        if self._sel_guard:  # yenileme sirasinda program degistiriyor, kullanici degil
+            return
+        self._was_playing = False  # başka cihazın durumu bu parçayı bitirmiş sayılmasın
+        self.reset_playback_ui()
+
+    def reset_playback_ui(self) -> None:
+        self._pos = self._dur = 0.0
+        self._poll_n = 0  # ses değeri bir sonraki yoklamada okunsun
+        self.seek_scale.set_sensitive(False)
+        self.seek_scale.set_range(0, 1)
+        self.seek_scale.set_value(0)
+        self.pos_label.set_text("0:00")
+        self.dur_label.set_text("0:00")
+
+    def poll(self) -> bool:
+        """Saniyede bir seçili renderer'ın konumunu sorar."""
+        if self._discovering:
+            return True  # yenileme sürerken cihaz listesi değişiyor
+        target = self.selected_renderer()
+        if target is not None and not self._polling:
+            self._polling = True
+            with_volume = self._poll_n % VOLUME_EVERY == 0
+            self._poll_n += 1
+            self.bridge.submit(self.cp.status(target.location, with_volume),
+                               on_done=self.on_status, on_error=self.on_status_error)
+        return True  # zamanlayıcı çalışmaya devam etsin
+
+    def on_status_error(self, _exc: Exception) -> None:
+        self._polling = False  # sessizce geç; cihaz o an yanıt vermemiş olabilir
+
+    def on_status(self, st: PlayStatus) -> None:
+        self._polling = False
+        settling = time.monotonic() - self._play_t0 < SETTLE_SECONDS
+        stopped = st.state in ("STOPPED", "NO_MEDIA_PRESENT", "")
+        if settling:
+            pass  # yeni parça başlıyor: cihazdan gelen eski durum bilgisini yok say
+        elif stopped:
+            if self._was_playing:
+                self._was_playing = False
+                self.maybe_advance()
+            if self._dur and not self.queue_just_started():
+                self.reset_playback_ui()
+        else:
+            if st.state in ("PLAYING", "PAUSED_PLAYBACK"):
+                self._was_playing = True
+                if st.position > 0:
+                    self._last_pos = st.position
+                if st.duration > 0:
+                    self._last_dur = st.duration
+            if st.duration != self._dur:
+                self._dur = st.duration
+                self.seek_scale.set_range(0, st.duration if st.duration > 0 else 1)
+                self.dur_label.set_text(fmt_time(st.duration) if st.duration > 0 else "--:--")
+                self.seek_scale.set_sensitive(st.duration > 0)
+            user_busy = self._seek_src or time.monotonic() - self._seek_touch < 2.0
+            if not user_busy:
+                self._pos = st.position
+                self.seek_scale.set_value(st.position)
+                self.pos_label.set_text(fmt_time(st.position))
+        vol_busy = self._vol_src or time.monotonic() - self._vol_touch < 2.0
+        if st.volume is not None and not vol_busy:
+            self.vol_scale.set_value(st.volume)
+
+    def queue_just_started(self) -> bool:
+        """maybe_advance yeni parça başlattıysa çubuğu tekrar sıfırlamaya gerek yok."""
+        return time.monotonic() - self._play_t0 < SETTLE_SECONDS
+
+    def go_back(self) -> None:
+        if len(self.stack) > 1:
+            self.stack.pop()
+            self.load_current()
+
+    # ---- yardımcılar ----
+    def set_status(self, text: str) -> None:
+        self.status.set_text(text)
+
+    def show_error(self, exc: Exception) -> None:
+        self.refresh_btn.set_sensitive(True)
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        self.set_status(f"Hata: {type(exc).__name__}: {exc}")
+
+
+class App(Gtk.Application):
+    def __init__(self) -> None:
+        super().__init__(application_id="io.github.dlnacast")
+
+    def do_activate(self) -> None:
+        win = self.props.active_window or MainWindow(self)
+        win.present()

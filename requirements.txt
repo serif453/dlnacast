@@ -1,0 +1,3 @@
+async-upnp-client>=0.38
+pychromecast>=13
+# PyGObject / GTK4 sistem paketinden gelir.
