@@ -25,7 +25,8 @@ Testler (GTK ve mpv gerekmez, sahte oynatıcı kullanır):
 - `__init__.py` – `__version__` ve `REPO` (GitHub deposu).
 - `__main__.py` – giriş noktası, `ui.App` başlatır.
 - `guncelleme.py` – GitHub'daki `main` dalının sürümünü okur; arayüzdeki "Güncelle" düğmesi `kur.sh --guncelle --ac`'ı terminalde açar.
-- `ui.py` – GTK4 arayüzü. Solda sunucular, sağda klasör içeriği, üstte hedef (renderer) seçimi, altta oynatma kontrolleri. Kuyruk (`QueueItem`), otomatik sonraki parça, seek/ses burada.
+- `ui.py` – GTK4 arayüzü (libadwaita yok; görünüm dosyanın başındaki `CSS` ile, tema renklerinden türetilir). Başlıkta hedef cihaz seçimi, yenile ve menü (Alıcı anahtarı, klasör paylaşma). Solda `local_list` (bu bilgisayar) ve `dev_list` (ağ sunucuları); sağda `view_stack` (karşılama / liste / yükleniyor); altta oynatıcı paneli (tek Oynat/Duraklat düğmesi `toggle_play`, durum `_set_state`). Kuyruk (`QueueItem`), otomatik sonraki parça, seek/ses burada.
+  Arayüzü bulutta görmek için: `apt-get install gir1.2-gtk-4.0`, `/usr/bin/python3.12` ile venv, Xvfb altında sahte cihazlarla açıp `Gtk.WidgetPaintable` ile ekran görüntüsü alınabilir.
 - `controlpoint.py` – `ControlPoint`: SSDP keşfi, ContentDirectory gezintisi, AVTransport/RenderingControl ile renderer kontrolü. Hedef türüne göre yönlendirir: mpv, Chromecast veya DLNA renderer.
 - `mediaserver.py` – kendi UPnP MediaServer'ı (SSDP duyurusu + ContentDirectory SOAP + dosya akıtma). Sadece standart kütüphane.
 - `localserver.py` – yerel dosyaları HTTP ile sunar (Range + CORS). `mediaserver` handler'ını buradan türetir. `lan_ip()` ve `guess_mime()` de burada.

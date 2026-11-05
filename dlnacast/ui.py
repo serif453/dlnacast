@@ -1,4 +1,4 @@
-"""GTK4 arayüzü: solda sunucular, sağda klasör içeriği, üstte hedef renderer seçimi."""
+"""GTK4 arayüzü: solda kaynaklar, sağda klasör içeriği, altta oynatıcı paneli."""
 import os
 import re
 import socket
@@ -27,6 +27,25 @@ POLL_SECONDS = 1
 VOLUME_EVERY = 10  # ses değerini kaç yoklamada bir oku
 SETTLE_SECONDS = 3.0  # yeni parça başlatıldıktan sonra eski durum bilgisini yok say
 END_TOLERANCE = 6.0  # parça bitmeden bu kadar saniye önce durduysa "bitti" sayılmaz
+
+# Tema renklerinden türetilir; açık ve koyu temada aynı şekilde çalışır.
+CSS = b"""
+.kenar { background-color: alpha(currentColor, 0.04); }
+.kenar list, .icerik list { background: transparent; }
+.kenar row { border-radius: 8px; margin: 1px 8px; }
+.icerik row { border-radius: 8px; margin: 1px 12px; }
+.bolum-baslik { font-size: 0.8em; font-weight: bold; opacity: 0.55; margin: 14px 18px 4px 18px; }
+.soluk { opacity: 0.6; }
+.kucuk { font-size: 0.9em; }
+.buyuk-baslik { font-size: 1.25em; font-weight: bold; }
+.karsilama-baslik { font-size: 1.6em; font-weight: bold; }
+.oynatici { border-top: 1px solid alpha(currentColor, 0.12); background-color: alpha(currentColor, 0.03); }
+.calan-baslik { font-weight: bold; font-size: 1.05em; }
+.yuvarlak { border-radius: 999px; min-width: 34px; min-height: 34px; padding: 0; }
+.oynat-dugmesi { border-radius: 999px; min-width: 48px; min-height: 48px; padding: 0; }
+.alici-isareti { font-size: 0.85em; font-weight: bold; color: #2e9d4a; margin: 0 6px; }
+.eylem { padding: 6px 10px; }
+"""
 
 
 def fmt_time(seconds: float) -> str:
@@ -99,12 +118,50 @@ def local_entries(folder: str) -> List[Entry]:
 
 
 class Row(Gtk.ListBoxRow):
-    def __init__(self, text: str, data) -> None:
+    def __init__(self, text: str, data, icon: str = "", subtitle: str = "") -> None:
         super().__init__()
         self.data = data
-        label = Gtk.Label(label=text, xalign=0, margin_top=8, margin_bottom=8,
-                          margin_start=12, margin_end=12, ellipsize=3)
-        self.set_child(label)
+        box = Gtk.Box(spacing=10, margin_top=7, margin_bottom=7, margin_start=10, margin_end=10)
+        if icon:
+            box.append(Gtk.Image(icon_name=icon, pixel_size=20))
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        texts.append(Gtk.Label(label=text, xalign=0, ellipsize=3))
+        if subtitle:
+            texts.append(Gtk.Label(label=subtitle, xalign=0, ellipsize=3, css_classes=["soluk", "kucuk"]))
+        box.append(texts)
+        self.set_child(box)
+
+
+def entry_icon(e: Entry) -> str:
+    """Liste satırı için simge adı."""
+    if e.is_container:
+        return "folder-symbolic"
+    kind = (e.mime or "").split("/")[0]
+    if kind == "audio" or "audioItem" in e.upnp_class:
+        return "audio-x-generic-symbolic"
+    if kind == "image" or "imageItem" in e.upnp_class:
+        return "image-x-generic-symbolic"
+    return "video-x-generic-symbolic"
+
+
+def placeholder(text: str) -> Gtk.Label:
+    return Gtk.Label(label=text, wrap=True, justify=Gtk.Justification.CENTER,
+                     margin_top=12, margin_bottom=12, margin_start=18, margin_end=18,
+                     css_classes=["soluk", "kucuk"])
+
+
+def section_title(text: str) -> Gtk.Label:
+    return Gtk.Label(label=text.upper(), xalign=0, css_classes=["bolum-baslik"])
+
+
+def action_button(icon: str, text: str, tip: str, fn) -> Gtk.Button:
+    """Simgeli ve yazılı düğme."""
+    box = Gtk.Box(spacing=8)
+    box.append(Gtk.Image(icon_name=icon))
+    box.append(Gtk.Label(label=text, xalign=0))
+    btn = Gtk.Button(child=box, tooltip_text=tip, css_classes=["eylem"])
+    btn.connect("clicked", lambda _b: fn())
+    return btn
 
 
 def clear(listbox: Gtk.ListBox) -> None:
@@ -119,15 +176,19 @@ class SharesWindow(Gtk.Window):
         super().__init__(title="Paylaşılan klasörler", transient_for=parent, modal=True)
         self.parent_win = parent
         self.set_default_size(520, 360)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                      margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        info = Gtk.Label(xalign=0, wrap=True,
-                         label="Buradaki klasörler ağdaki TV, telefon ve diğer cihazlara açılır.")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                      margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        box.append(Gtk.Label(label="Paylaşılan klasörler", xalign=0, css_classes=["buyuk-baslik"]))
+        info = Gtk.Label(xalign=0, wrap=True, css_classes=["soluk"],
+                         label="Buraya eklediğin klasörler ağdaki TV, telefon ve diğer cihazlarda görünür.")
         box.append(info)
-        self.listbox = Gtk.ListBox(vexpand=True)
+        self.listbox = Gtk.ListBox(vexpand=True, selection_mode=Gtk.SelectionMode.NONE)
+        self.listbox.set_placeholder(placeholder("Henüz paylaşılan klasör yok."))
         box.append(Gtk.ScrolledWindow(child=self.listbox, vexpand=True))
-        add = Gtk.Button(label="Klasör ekle…")
-        add.connect("clicked", lambda *_: self.add_folder())
+        add = action_button("list-add-symbolic", "Klasör ekle…", "Paylaşılacak klasörü seç",
+                            self.add_folder)
+        add.add_css_class("suggested-action")
+        add.set_halign(Gtk.Align.START)
         box.append(add)
         self.set_child(box)
         self.fill()
@@ -135,9 +196,11 @@ class SharesWindow(Gtk.Window):
     def fill(self) -> None:
         clear(self.listbox)
         for path in self.parent_win.config["shares"]:
-            row = Gtk.Box(spacing=8, margin_top=4, margin_bottom=4, margin_start=8, margin_end=8)
+            row = Gtk.Box(spacing=10, margin_top=6, margin_bottom=6, margin_start=8, margin_end=8)
+            row.append(Gtk.Image(icon_name="folder-symbolic"))
             row.append(Gtk.Label(label=path, xalign=0, hexpand=True, ellipsize=3))
-            btn = Gtk.Button(label="Kaldır")
+            btn = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Paylaşımdan kaldır",
+                             css_classes=["flat"])
             btn.connect("clicked", lambda _b, p=path: self.remove(p))
             row.append(btn)
             self.listbox.append(row)
@@ -167,7 +230,7 @@ class SharesWindow(Gtk.Window):
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app: Gtk.Application) -> None:
         super().__init__(application=app, title=f"DLNA Cast {__version__}")
-        self.set_default_size(1040, 640)
+        self.set_default_size(1120, 720)
         self.bridge = AsyncBridge()
         self.cp = ControlPoint()
         self.local = LocalServer()
@@ -205,109 +268,221 @@ class MainWindow(Gtk.ApplicationWindow):
         self._last_dur = 0.0
         self._play_t0 = 0.0
 
-        # Başlık çubuğu
+        self._state = ""  # seçili cihazın son bilinen oynatma durumu
+
+        css = Gtk.CssProvider()
+        css.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(self.get_display(), css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        # ---- başlık çubuğu: hedef cihaz, yenile, menü ----
         header = Gtk.HeaderBar()
         self.set_titlebar(header)
-        self.refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Cihazları ara")
-        self.refresh_btn.connect("clicked", lambda *_: self.refresh())
-        header.pack_start(self.refresh_btn)
-        open_btn = Gtk.Button(icon_name="document-open-symbolic",
-                              tooltip_text="Bilgisayardan dosya(lar) seç ve sırayla oynat")
-        open_btn.connect("clicked", lambda *_: self.open_file())
-        header.pack_start(open_btn)
-        folder_btn = Gtk.Button(icon_name="folder-open-symbolic",
-                                tooltip_text="Bilgisayardan klasör aç: videolar listelenir, birini seçip TV'ye gönder")
-        folder_btn.connect("clicked", lambda *_: self.play_local_folder())
-        header.pack_start(folder_btn)
-        share_btn = Gtk.Button(label="Klasör paylaş", tooltip_text="Klasörleri ağa aç (media server)")
-        share_btn.connect("clicked", lambda *_: SharesWindow(self).present())
-        header.pack_start(share_btn)
-        self.back_btn = Gtk.Button(icon_name="go-previous-symbolic", sensitive=False,
-                                   tooltip_text="Geri")
-        self.back_btn.connect("clicked", lambda *_: self.go_back())
-        header.pack_start(self.back_btn)
         self.renderer_switch = Gtk.Switch(
             valign=Gtk.Align.CENTER,
             tooltip_text="Açıkken telefon ve bilgisayarlar bu bilgisayarı TV gibi görür; "
                          "gönderdikleri video/müzik burada oynar (DLNA renderer)")
+        menu = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                       margin_top=10, margin_bottom=10, margin_start=10, margin_end=10)
+        alici = Gtk.Box(spacing=12)
+        alici_txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        alici_txt.append(Gtk.Label(label="Alıcı modu", xalign=0, css_classes=["calan-baslik"]))
+        alici_txt.append(Gtk.Label(label="Telefondan bu bilgisayara video gönderilebilir.",
+                                   xalign=0, wrap=True, max_width_chars=34,
+                                   css_classes=["soluk", "kucuk"]))
+        alici.append(alici_txt)
+        alici.append(self.renderer_switch)
+        menu.append(alici)
+        menu.append(Gtk.Separator())
+        self.menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", tooltip_text="Menü")
+        menu.append(action_button("folder-publicshare-symbolic", "Klasörleri ağda paylaş…",
+                                  "Klasörleri ağdaki TV ve telefonlara aç",
+                                  self.open_shares))
+        menu.append(Gtk.Separator())
+        menu.append(Gtk.Label(label=f"DLNA Cast {__version__}", xalign=0, css_classes=["soluk", "kucuk"]))
+        self.menu_btn.set_popover(Gtk.Popover(child=menu))
+        header.pack_end(self.menu_btn)
+
         self.update_btn = Gtk.Button(label="Güncelle", visible=False, css_classes=["suggested-action"])
         self.update_btn.connect("clicked", lambda *_: self.start_update())
-        header.pack_end(self.update_btn)
-        header.pack_end(self.renderer_switch)
-        header.pack_end(Gtk.Label(label="Alıcı:"))
+        self.refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Cihazları yeniden ara")
+        self.refresh_btn.connect("clicked", lambda *_: self.refresh())
+        header.pack_end(self.refresh_btn)
         self.renderer_model = Gtk.StringList()
-        self.renderer_drop = Gtk.DropDown(model=self.renderer_model)
+        self.renderer_drop = Gtk.DropDown(model=self.renderer_model,
+                                          tooltip_text="Videonun oynatılacağı cihaz")
         self.renderer_drop.connect("notify::selected", lambda *_: self.on_renderer_changed())
-        header.pack_end(self.renderer_drop)
-        header.pack_end(Gtk.Label(label="Oynat:"))
-        self.play_all_btn = Gtk.Button(label="▶ Tümünü oynat",
-                                       tooltip_text="Açık klasördeki tüm videoları baştan sırayla oynat")
-        self.play_all_btn.connect("clicked", lambda *_: self.play_all())
-        header.pack_end(self.play_all_btn)
+        target = Gtk.Box(spacing=6)
+        target.append(Gtk.Image(icon_name="video-display-symbolic"))
+        target.append(self.renderer_drop)
+        header.pack_end(target)
+        header.pack_end(self.update_btn)
+        self.alici_label = Gtk.Label(label="● Alıcı açık", visible=False, css_classes=["alici-isareti"],
+                                     tooltip_text="Ağdaki cihazlar bu bilgisayara video gönderebilir")
+        header.pack_start(self.alici_label)
 
-        # Gövde
+        # ---- sol panel: kaynaklar ----
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["kenar"])
+        side.set_size_request(250, -1)
+        acts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                       margin_top=12, margin_start=10, margin_end=10)
+        for btn in (action_button("document-open-symbolic", "Dosya aç",
+                                  "Bilgisayardan dosya(lar) seç ve sırayla oynat", self.open_file),
+                    action_button("folder-open-symbolic", "Klasör aç",
+                                  "Bilgisayardan klasör aç, içindeki videolar listelensin",
+                                  self.play_local_folder)):
+            btn.add_css_class("flat")
+            acts.append(btn)
+        side.append(acts)
+        side.append(section_title("Bu bilgisayar"))
+        self.local_list = Gtk.ListBox()
+        self.local_list.set_placeholder(placeholder("Açtığın ve paylaştığın klasörler burada görünür."))
+        self.local_list.connect("row-activated", self.on_server_activated)
+        side.append(self.local_list)
+        side.append(section_title("Ağdaki sunucular"))
         self.dev_list = Gtk.ListBox()
+        self.dev_list.set_placeholder(placeholder("Ağda medya sunucusu bulunamadı."))
         self.dev_list.connect("row-activated", self.on_server_activated)
+        side.append(self.dev_list)
+        side_scroll = Gtk.ScrolledWindow(child=side, hscrollbar_policy=Gtk.PolicyType.NEVER)
+
+        # ---- sağ alan: klasör içeriği ----
+        self.back_btn = Gtk.Button(icon_name="go-previous-symbolic", sensitive=False,
+                                   tooltip_text="Geri", css_classes=["flat"])
+        self.back_btn.connect("clicked", lambda *_: self.go_back())
+        self.view_title = Gtk.Label(xalign=0, ellipsize=3, css_classes=["buyuk-baslik"])
+        self.view_sub = Gtk.Label(xalign=0, ellipsize=3, css_classes=["soluk", "kucuk"])
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        titles.append(self.view_title)
+        titles.append(self.view_sub)
+        self.play_all_btn = action_button("media-playback-start-symbolic", "Tümünü oynat",
+                                          "Bu klasördeki her şeyi baştan sırayla oynat", self.play_all)
+        self.play_all_btn.add_css_class("suggested-action")
+        topbar = Gtk.Box(spacing=8, margin_top=10, margin_bottom=6, margin_start=12, margin_end=16)
+        topbar.append(self.back_btn)
+        topbar.append(titles)
+        topbar.append(self.play_all_btn)
+
         self.item_list = Gtk.ListBox()
+        self.item_list.set_placeholder(placeholder("Bu klasörde video ya da müzik yok."))
         self.item_list.connect("row-activated", self.on_entry_activated)
+        liste = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["icerik"])
+        liste.append(topbar)
+        liste.append(Gtk.ScrolledWindow(child=self.item_list, vexpand=True,
+                                        hscrollbar_policy=Gtk.PolicyType.NEVER))
 
-        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=280, vexpand=True)
-        paned.set_start_child(Gtk.ScrolledWindow(child=self.dev_list))
-        paned.set_end_child(Gtk.ScrolledWindow(child=self.item_list))
+        welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                          valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
+        welcome.append(Gtk.Image(icon_name="video-display-symbolic", pixel_size=72,
+                                 css_classes=["soluk"]))
+        welcome.append(Gtk.Label(label="Ne izlemek istersin?", css_classes=["karsilama-baslik"]))
+        welcome.append(Gtk.Label(
+            label="Bilgisayarından bir dosya ya da klasör aç, veya soldan bir sunucu seç.\n"
+                  "Nerede oynatılacağını sağ üstten seçebilirsin.",
+            justify=Gtk.Justification.CENTER, wrap=True, css_classes=["soluk"]))
+        wbtns = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER, margin_top=8)
+        wfile = action_button("document-open-symbolic", "Dosya aç", "Bilgisayardan dosya seç",
+                              self.open_file)
+        wfile.add_css_class("suggested-action")
+        wbtns.append(wfile)
+        wbtns.append(action_button("folder-open-symbolic", "Klasör aç", "Bilgisayardan klasör aç",
+                                   self.play_local_folder))
+        welcome.append(wbtns)
 
-        # İlerleme çubuğu
-        self.pos_label = Gtk.Label(label="0:00", width_chars=7, xalign=1)
-        self.dur_label = Gtk.Label(label="0:00", width_chars=7, xalign=0)
-        self.seek_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
-        self.seek_scale.set_draw_value(False)
-        self.seek_scale.set_hexpand(True)
-        self.seek_scale.set_sensitive(False)
-        self.seek_scale.connect("change-value", self.on_seek_changed)
-        seekbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
-                          margin_start=12, margin_end=12, margin_top=4)
-        seekbox.append(self.pos_label)
-        seekbox.append(self.seek_scale)
-        seekbox.append(self.dur_label)
+        loading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                          valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER)
+        self.spinner = Gtk.Spinner(width_request=32, height_request=32)
+        loading.append(self.spinner)
+        self.loading_label = Gtk.Label(css_classes=["soluk"])
+        loading.append(self.loading_label)
 
-        # Alt çubuk: durum + düğmeler + ses
-        self.status = Gtk.Label(xalign=0, hexpand=True, margin_start=12,
-                                margin_top=6, margin_bottom=6, ellipsize=3)
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                      margin_end=12, margin_top=4, margin_bottom=4)
-        bar.append(self.status)
+        self.view_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, hexpand=True)
+        self.view_stack.add_named(welcome, "karsilama")
+        self.view_stack.add_named(liste, "liste")
+        self.view_stack.add_named(loading, "yukleniyor")
 
-        def add_btn(icon: str, tip: str, fn) -> Gtk.Button:
-            btn = Gtk.Button(icon_name=icon, tooltip_text=tip)
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=260, vexpand=True,
+                          shrink_start_child=False, resize_start_child=False)
+        paned.set_start_child(side_scroll)
+        paned.set_end_child(self.view_stack)
+
+        # ---- alt panel: oynatıcı ----
+        self.now_icon = Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=28,
+                                  css_classes=["soluk"])
+        self.now_title = Gtk.Label(label="Çalan bir şey yok", xalign=0, ellipsize=3,
+                                   css_classes=["calan-baslik"])
+        self.now_sub = Gtk.Label(xalign=0, ellipsize=3, css_classes=["soluk", "kucuk"])
+        now_txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        now_txt.append(self.now_title)
+        now_txt.append(self.now_sub)
+        now = Gtk.Box(spacing=10)
+        now.set_size_request(280, -1)
+        now.append(self.now_icon)
+        now.append(now_txt)
+
+        controls = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+
+        def add_btn(icon: str, tip: str, fn, big: bool = False) -> Gtk.Button:
+            btn = Gtk.Button(icon_name=icon, tooltip_text=tip, valign=Gtk.Align.CENTER,
+                             css_classes=["oynat-dugmesi", "suggested-action"] if big else ["yuvarlak", "flat"])
             btn.connect("clicked", lambda _b: fn())
-            bar.append(btn)
+            controls.append(btn)
             return btn
 
         self.prev_btn = add_btn("media-skip-backward-symbolic", "Önceki", self.prev_item)
         add_btn("media-seek-backward-symbolic", f"{SKIP_SECONDS} sn geri",
                 lambda: self.skip(-SKIP_SECONDS))
-        add_btn("media-playback-pause-symbolic", "Duraklat", lambda: self.send_control("pause"))
-        add_btn("media-playback-start-symbolic", "Devam", lambda: self.send_control("resume"))
-        add_btn("media-playback-stop-symbolic", "Durdur", lambda: self.send_control("stop"))
+        self.play_btn = add_btn("media-playback-start-symbolic", "Oynat / Duraklat",
+                                self.toggle_play, big=True)
         add_btn("media-seek-forward-symbolic", f"{SKIP_SECONDS} sn ileri",
                 lambda: self.skip(SKIP_SECONDS))
         self.next_btn = add_btn("media-skip-forward-symbolic", "Sonraki", self.next_item)
+        add_btn("media-playback-stop-symbolic", "Durdur", lambda: self.send_control("stop"))
         self.prev_btn.set_sensitive(False)
         self.next_btn.set_sensitive(False)
+
         self.autonext = Gtk.CheckButton(label="Otomatik sonraki", active=True,
                                         tooltip_text="Parça bitince sıradakine geç")
-        bar.append(self.autonext)
-        bar.append(Gtk.Image.new_from_icon_name("audio-volume-high-symbolic"))
         self.vol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         self.vol_scale.set_draw_value(False)
         self.vol_scale.set_size_request(120, -1)
         self.vol_scale.set_value(50)
         self.vol_scale.connect("change-value", self.on_volume_changed)
-        bar.append(self.vol_scale)
+        right = Gtk.Box(spacing=8, halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        right.set_size_request(280, -1)
+        right.append(self.autonext)
+        right.append(Gtk.Image(icon_name="audio-volume-high-symbolic"))
+        right.append(self.vol_scale)
+
+        row1 = Gtk.CenterBox()
+        row1.set_start_widget(now)
+        row1.set_center_widget(controls)
+        row1.set_end_widget(right)
+
+        self.pos_label = Gtk.Label(label="0:00", width_chars=7, xalign=1, css_classes=["soluk", "kucuk"])
+        self.dur_label = Gtk.Label(label="0:00", width_chars=7, xalign=0, css_classes=["soluk", "kucuk"])
+        self.seek_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
+        self.seek_scale.set_draw_value(False)
+        self.seek_scale.set_hexpand(True)
+        self.seek_scale.set_sensitive(False)
+        self.seek_scale.connect("change-value", self.on_seek_changed)
+        seekbox = Gtk.Box(spacing=8)
+        seekbox.append(self.pos_label)
+        seekbox.append(self.seek_scale)
+        seekbox.append(self.dur_label)
+
+        self.status = Gtk.Label(xalign=0, ellipsize=3, css_classes=["soluk", "kucuk"])
+        player = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, css_classes=["oynatici"])
+        for w, top, bottom in ((row1, 10, 0), (seekbox, 0, 0), (self.status, 0, 8)):
+            w.set_margin_start(16)
+            w.set_margin_end(16)
+            w.set_margin_top(top)
+            w.set_margin_bottom(bottom)
+            player.append(w)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(paned)
-        box.append(seekbox)
-        box.append(bar)
+        box.append(player)
         self.set_child(box)
 
         self.config = load_config()
@@ -341,6 +516,7 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self.renderer.stop()
             self.set_status("Alıcı kapatıldı.")
+        self.alici_label.set_visible(want)
         self.config["renderer"] = want
         save_config(self.config)
 
@@ -350,6 +526,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.cp.player.close()
         self.cp.cast.close()
         return False
+
+    def open_shares(self) -> None:
+        self.menu_btn.popdown()
+        SharesWindow(self).present()
 
     def shares_changed(self, save: bool = True) -> None:
         if save:
@@ -364,8 +544,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.show_error(exc)
                 return
         if save:
-            self.set_status(f"{len(self.mserver.shares)} klasör paylaşılıyor. "
-                            "Listede görünmesi için yenile düğmesine bas.")
+            self.set_status(f"{len(self.mserver.shares)} klasör ağda paylaşılıyor.")
 
     def local_dirs(self) -> List[str]:
         out: List[str] = []
@@ -377,15 +556,18 @@ class MainWindow(Gtk.ApplicationWindow):
     def sync_local_rows(self) -> None:
         """Paylaşılan ve açılan klasörleri sol listede gösterir (diskten gezilir)."""
         wanted = self.local_dirs()
+        shared = set(self.config.get("shares", []))
         for p in list(self._local_rows):
             if p not in wanted:
-                self.dev_list.remove(self._local_rows.pop(p))
+                self.local_list.remove(self._local_rows.pop(p))
         for p in wanted:
             if p not in self._local_rows:
                 name = os.path.basename(p.rstrip(os.sep)) or p
-                row = Row("💻  " + name, DeviceInfo(name, p, "localdir"))
+                icon = "folder-publicshare-symbolic" if p in shared else "folder-symbolic"
+                row = Row(name, DeviceInfo(name, p, "localdir"), icon=icon,
+                          subtitle="Ağda paylaşılıyor" if p in shared else "")
                 row.set_tooltip_text(p)
-                self.dev_list.append(row)
+                self.local_list.append(row)
                 self._local_rows[p] = row
 
     def selected_renderer(self) -> Optional[DeviceInfo]:
@@ -401,10 +583,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self._discovering = True
         self.servers.clear()
         self.renderers.clear()
-        self.entries = []
-        self.entry_rows = []
+        if not self.view_local:  # sunucu listesi yenileniyor; açık sunucu klasörü geçersiz olur
+            self.entries = []
+            self.entry_rows = []
+            self.stack = []
+            clear(self.item_list)
+            self.view_stack.set_visible_child_name("karsilama")
         clear(self.dev_list)
-        clear(self.item_list)
         self._sel_guard = True
         try:
             self.renderer_model.splice(0, self.renderer_model.get_n_items(), [])
@@ -412,10 +597,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self.renderer_model.append("Bu bilgisayar (mpv)")
         finally:
             self._sel_guard = False
-        self._local_rows = {}
         self.sync_local_rows()  # paylaşılan ve açılan klasörler diskten listelenir
         self.refresh_btn.set_sensitive(False)
-        self.set_status("Cihazlar aranıyor…")
+        self.set_status("Ağdaki cihazlar aranıyor…")
         self.bridge.submit(
             self.cp.discover(lambda info: to_ui(self.add_device, info)),
             on_done=self.discovery_done,
@@ -431,7 +615,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return  # kendi alicimiz: "Bu bilgisayar (mpv)" zaten var
         if info.kind == "server":
             self.servers.append(info)
-            self.dev_list.append(Row("📁  " + info.name, info))
+            self.dev_list.append(Row(info.name, info, icon="network-server-symbolic"))
         else:
             if any(r.location == info.location for r in self.renderers):
                 return
@@ -455,11 +639,11 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.renderer_drop.set_selected(1)
         lost = (want not in (None, LOCAL_PLAYER_ID)
                 and not any(r.location == want for r in self.renderers))
-        msg = f"{len(self.servers)} sunucu, {others} ağ renderer'ı bulundu (+ bu bilgisayar)."
+        msg = f"Arama bitti: {len(self.servers)} sunucu, {others} oynatıcı cihaz bulundu."
         if lost:
-            msg += "  ⚠ önceki hedef cihaz bulunamadı, Bu bilgisayar seçili"
+            msg += "  Önceki cihaz bulunamadı, \"Bu bilgisayar\" seçildi."
         if self.cp.errors:
-            msg += f"  ⚠ {len(self.cp.errors)} uyarı (ayrıntı terminalde; tani.sh çalıştır)"
+            msg += f"  ({len(self.cp.errors)} uyarı; ayrıntı için tani.sh)"
         self.set_status(msg)
 
     def discovery_failed(self, exc: Exception) -> None:
@@ -467,7 +651,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.show_error(exc)
 
     # ---- gezinme ----
-    def on_server_activated(self, _lb, row: Row) -> None:
+    def on_server_activated(self, lb, row: Row) -> None:
+        other = self.dev_list if lb is self.local_list else self.local_list
+        other.unselect_all()
         if row.data.kind == "localdir":
             self.open_local(row.data.location)
             return
@@ -491,7 +677,9 @@ class MainWindow(Gtk.ApplicationWindow):
             except Exception as exc:  # noqa: BLE001
                 self.show_error(exc)
             return
-        self.set_status(f"{title} yükleniyor…")
+        self.loading_label.set_text(f"{title} yükleniyor…")
+        self.spinner.start()
+        self.view_stack.set_visible_child_name("yukleniyor")
         self.bridge.submit(
             self.cp.browse(self.current_server.location, object_id),
             on_done=self.show_entries,
@@ -503,13 +691,23 @@ class MainWindow(Gtk.ApplicationWindow):
         self.entries = entries
         self.entry_rows = []
         for e in entries:
-            icon = "📂" if e.is_container else "▶"
-            row = Row(f"{icon}  {e.title}", e)
+            row = Row(e.title, e, icon=entry_icon(e))
             self.item_list.append(row)
             self.entry_rows.append(row)
-        path = " / ".join(t for _, t in self.stack)
+        self.spinner.stop()
+        folders = sum(1 for e in entries if e.is_container)
         playable = sum(1 for e in entries if is_playable(e))
-        self.set_status(f"{path}  ({len(entries)} öğe, {playable} oynatılabilir)")
+        parts = []
+        if folders:
+            parts.append(f"{folders} klasör")
+        if playable:
+            parts.append(f"{playable} video/müzik")
+        source = "Bu bilgisayar" if self.view_local else (self.current_server.name if self.current_server else "")
+        trail = " / ".join([source] + [t for _, t in self.stack[:-1]])
+        self.view_title.set_text(self.stack[-1][1] if self.stack else "")
+        self.view_sub.set_text(f"{trail}  ·  {', '.join(parts) or 'boş'}")
+        self.play_all_btn.set_sensitive(playable > 0)
+        self.view_stack.set_visible_child_name("liste")
 
     def on_entry_activated(self, _lb, row: Row) -> None:
         e: Entry = row.data
@@ -653,8 +851,13 @@ class MainWindow(Gtk.ApplicationWindow):
         row = self.queue_rows[idx] if idx < len(self.queue_rows) else None
         if row is not None and row.get_parent() is not None:  # klasör hâlâ ekranda
             self.item_list.select_row(row)
-        where = f"{idx + 1}/{len(self.queue)}" if len(self.queue) > 1 else ""
-        self.set_status(f"{target.name} • {where} {item.title}".replace("•  ", "• "))
+        where = f"  ·  {idx + 1}/{len(self.queue)}" if len(self.queue) > 1 else ""
+        self.now_title.set_text(item.title)
+        self.now_sub.set_text(f"{target.name}{where}")
+        mime = mime or ""
+        self.now_icon.set_from_icon_name("audio-x-generic-symbolic" if mime.startswith("audio/")
+                                         else "video-x-generic-symbolic")
+        self.set_status(f"{target.name} cihazına gönderiliyor…")
         self.bridge.submit(self.cp.play(target.location, uri, mime, item.title),
                            on_error=self.show_error)
 
@@ -691,6 +894,24 @@ class MainWindow(Gtk.ApplicationWindow):
         elif cmd == "resume":
             self._user_stopped = False
         self.bridge.submit(self.cp.control(target.location, cmd), on_error=self.show_error)
+
+    def toggle_play(self) -> None:
+        """Çalıyorsa duraklatır, değilse devam ettirir; kuyruk hiç başlamadıysa ilk öğeyi başlatır."""
+        if self._state in ("PLAYING", "TRANSITIONING"):
+            self.send_control("pause")
+        elif self._state in ("STOPPED", "NO_MEDIA_PRESENT", "") and self.queue and self.queue_idx < 0:
+            self.start_item(0)
+        elif self._state in ("STOPPED", "NO_MEDIA_PRESENT", "") and self.queue_idx >= 0 and self._user_stopped:
+            self.start_item(self.queue_idx)
+        else:
+            self.send_control("resume")
+
+    def _set_state(self, state: str) -> None:
+        self._state = state
+        playing = state in ("PLAYING", "TRANSITIONING")
+        self.play_btn.set_icon_name("media-playback-pause-symbolic" if playing
+                                    else "media-playback-start-symbolic")
+        self.play_btn.set_tooltip_text("Duraklat" if playing else "Oynat")
 
     def skip(self, delta: float) -> None:
         target = self.selected_renderer()
@@ -743,6 +964,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._sel_guard:  # yenileme sirasinda program degistiriyor, kullanici degil
             return
         self._was_playing = False  # başka cihazın durumu bu parçayı bitirmiş sayılmasın
+        self._set_state("")
         self.reset_playback_ui()
 
     def reset_playback_ui(self) -> None:
@@ -772,6 +994,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def on_status(self, st: PlayStatus) -> None:
         self._polling = False
+        self._set_state(st.state)
         settling = time.monotonic() - self._play_t0 < SETTLE_SECONDS
         stopped = st.state in ("STOPPED", "NO_MEDIA_PRESENT", "")
         if settling:
@@ -842,6 +1065,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def show_error(self, exc: Exception) -> None:
         self.refresh_btn.set_sensitive(True)
+        self.spinner.stop()
+        if self.view_stack.get_visible_child_name() == "yukleniyor":
+            self.view_stack.set_visible_child_name("liste" if self.entries else "karsilama")
         traceback.print_exception(type(exc), exc, exc.__traceback__)
         self.set_status(f"Hata: {type(exc).__name__}: {exc}")
 

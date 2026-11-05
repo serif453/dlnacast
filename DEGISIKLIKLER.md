@@ -1,5 +1,11 @@
 # Değişiklikler
 
+## 0.3.0
+- Yeni, sade arayüz: solda "Dosya aç", "Klasör aç", bilgisayarındaki klasörler ve ağdaki sunucular.
+- Boş ekranda yol gösteren karşılama sayfası; listelerde klasör, video ve müzik simgeleri.
+- Altta oynatıcı paneli: çalan parçanın adı, hangi cihazda çaldığı ve tek büyük Oynat/Duraklat düğmesi.
+- Alıcı modu ve klasör paylaşma sağ üstteki menüde (☰); alıcı açıkken başlıkta "Alıcı açık" yazar.
+
 ## 0.2.0
 - Tek komutla kurulum: program uygulama menüsünde "DLNA Cast" olarak görünür, tıklayarak açılır.
 - Tek tıkla güncelleme: yeni sürüm varsa başlık çubuğunda "Güncelle" düğmesi çıkar; menüde "DLNA Cast Güncelle" de var.
