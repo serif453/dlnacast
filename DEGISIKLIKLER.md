@@ -1,5 +1,11 @@
 # Değişiklikler
 
+## 0.4.0
+- Başlığın ortasında büyük "Şurada oynat" düğmesi: cihazlar simgeleriyle (TV, Chromecast, bu bilgisayar) listelenir.
+- Hatalar ekranda sade Türkçe bildirim olarak çıkar; açtığın klasörler artık hatırlanır (✕ ile listeden kaldırılır).
+- Videoların yanında ▶ düğmesi, çalan video listede vurgulu; dosya ya da klasörü pencereye sürükleyip bırakabilirsin.
+- Kısayollar: Boşluk oynat/duraklat, ← → 10 sn, Backspace geri. "Bitince sıradakine geç" ayarı menüde.
+
 ## 0.3.0
 - Yeni, sade arayüz: solda "Dosya aç", "Klasör aç", bilgisayarındaki klasörler ve ağdaki sunucular.
 - Boş ekranda yol gösteren karşılama sayfası; listelerde klasör, video ve müzik simgeleri.

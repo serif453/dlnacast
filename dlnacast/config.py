@@ -18,6 +18,8 @@ def load_config() -> dict:
     cfg.setdefault("shares", [])
     cfg.setdefault("renderer_uuid", str(uuid.uuid4()))  # alıcı (renderer) kimliği
     cfg.setdefault("renderer", False)  # alıcı açık mı (bir sonraki açılışta hatırlanır)
+    cfg.setdefault("recent", [])  # son açılan klasörler (sol listede görünür)
+    cfg.setdefault("autonext", True)  # video bitince sıradakine geç
     return cfg
 
 
