@@ -99,19 +99,20 @@ if [ -n "$YEREL" ]; then
     YENI="$(surum_oku "$KAYNAK")"
 else
     echo "GitHub'da son sürüm aranıyor..."
-    if ! JSON="$(curl -fsSL --retry 3 "https://api.github.com/repos/$REPO/tags?per_page=100")"; then
+    if ! JSON="$(curl -fsSL --retry 3 "https://api.github.com/repos/$REPO/commits/main")"; then
         echo "GitHub'a ulaşılamadı. İnternet bağlantını kontrol edip tekrar dene."
         false
     fi
-    ETIKET="$(printf '%s' "$JSON" | python3 -c '
-import json, re, sys
-ad = [t["name"] for t in json.load(sys.stdin) if re.fullmatch(r"v?\d+(\.\d+)*", t["name"])]
-print(max(ad, key=lambda e: tuple(int(p) for p in e.lstrip("v").split("."))) if ad else "")')"
-    if [ -z "$ETIKET" ]; then echo "GitHub'da sürüm bulunamadı."; false; fi
-    YENI="${ETIKET#v}"
+    SHA="$(printf '%s' "$JSON" | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha"])')"
+    YENI="$(curl -fsSL --retry 3 "https://raw.githubusercontent.com/$REPO/$SHA/dlnacast/__init__.py" \
+            | sed -n 's/^__version__ = "\(.*\)"/\1/p' | head -n1)"
+    if [ -z "$YENI" ]; then echo "GitHub'daki sürüm okunamadı."; false; fi
 fi
 
-if [ "$MOD" = guncelle ] && [ -n "$KURULU" ] && [ "$KURULU" = "$YENI" ]; then
+if [ "$MOD" = guncelle ] && [ -n "$KURULU" ] && ! python3 -c '
+import sys
+t = lambda v: tuple(int(p) for p in v.split(".") if p.isdigit())
+sys.exit(0 if t(sys.argv[2]) > t(sys.argv[1]) else 1)' "$KURULU" "$YENI"; then
     echo "Zaten en son sürüm kurulu ($KURULU)."
     if [ "$AC" = 1 ]; then setsid -f "$HEDEF/baslat.sh" >/dev/null 2>&1 || true; fi
     bekle
@@ -119,8 +120,8 @@ if [ "$MOD" = guncelle ] && [ -n "$KURULU" ] && [ "$KURULU" = "$YENI" ]; then
 fi
 
 if [ -z "$YEREL" ]; then
-    echo "İndiriliyor: $ETIKET"
-    curl -fsSL --retry 3 -o "$TMP/kod.tar.gz" "https://github.com/$REPO/archive/refs/tags/$ETIKET.tar.gz"
+    echo "İndiriliyor: sürüm $YENI"
+    curl -fsSL --retry 3 -o "$TMP/kod.tar.gz" "https://github.com/$REPO/archive/$SHA.tar.gz"
     mkdir "$TMP/kod"
     tar -xzf "$TMP/kod.tar.gz" -C "$TMP/kod" --strip-components=1
     KAYNAK="$TMP/kod"

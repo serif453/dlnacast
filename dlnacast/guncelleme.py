@@ -13,29 +13,32 @@ UYGULAMA_DIZINI = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def surum_tuple(text: str) -> Tuple[int, ...]:
-    """"v0.10.2" -> (0, 10, 2). Sayı olmayan etiketler için boş tuple."""
+    """"0.10.2" ya da "v0.10.2" -> (0, 10, 2). Geçersizse boş tuple."""
     m = re.fullmatch(r"v?(\d+(?:\.\d+)*)", text.strip())
     return tuple(int(p) for p in m.group(1).split(".")) if m else ()
 
 
-def en_yeni(etiketler) -> Optional[str]:
-    """Etiket adlarından en yüksek sürümü döndürür (yoksa None)."""
-    gecerli = [e for e in etiketler if surum_tuple(e)]
-    return max(gecerli, key=surum_tuple) if gecerli else None
+def surum_metinden(init_py: str) -> Optional[str]:
+    """__init__.py içeriğinden __version__ değerini çıkarır."""
+    m = re.search(r'^__version__ = "([^"]+)"', init_py, re.M)
+    return m.group(1) if m else None
+
+
+def _getir(url: str, timeout: float) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "dlnacast-guncelleme"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
 
 
 def son_surum(timeout: float = 8.0) -> Optional[str]:
-    """GitHub'daki en yeni sürüm etiketini döndürür ("v0.3.0" gibi). Ağ hatasında istisna atar."""
-    req = urllib.request.Request(
-        f"https://api.github.com/repos/{REPO}/tags?per_page=100",
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "dlnacast-guncelleme"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.load(r)
-    return en_yeni(t.get("name", "") for t in data)
+    """GitHub'daki main dalının sürümünü döndürür ("0.3.0" gibi). Ağ hatasında istisna atar."""
+    sha = json.loads(_getir(f"https://api.github.com/repos/{REPO}/commits/main", timeout))["sha"]
+    init = _getir(f"https://raw.githubusercontent.com/{REPO}/{sha}/dlnacast/__init__.py", timeout)
+    return surum_metinden(init.decode("utf-8"))
 
 
 def yeni_surum_var() -> Optional[str]:
-    """Kurulu sürümden yeni bir sürüm varsa onun adını döndürür."""
+    """Kurulu sürümden yeni bir sürüm varsa onun numarasını döndürür."""
     son = son_surum()
     if son and surum_tuple(son) > surum_tuple(__version__):
         return son

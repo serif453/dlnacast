@@ -2,7 +2,7 @@
 import unittest
 
 from dlnacast import __version__
-from dlnacast.guncelleme import en_yeni, surum_tuple
+from dlnacast.guncelleme import surum_metinden, surum_tuple
 
 
 class SurumTest(unittest.TestCase):
@@ -12,9 +12,12 @@ class SurumTest(unittest.TestCase):
         self.assertEqual(surum_tuple("deneme"), ())
         self.assertEqual(surum_tuple("v1.0-beta"), ())
 
-    def test_en_yeni_sayisal_siralar(self):
-        self.assertEqual(en_yeni(["v0.9.0", "v0.10.0", "v0.2.1", "baska"]), "v0.10.0")
-        self.assertIsNone(en_yeni(["baska"]))
+    def test_sayisal_karsilastirma(self):
+        self.assertGreater(surum_tuple("0.10.0"), surum_tuple("0.9.3"))
+
+    def test_surum_metinden(self):
+        self.assertEqual(surum_metinden('__version__ = "1.4.2"\nREPO = "x"\n'), "1.4.2")
+        self.assertIsNone(surum_metinden("bos"))
 
     def test_kurulu_surum_gecerli(self):
         self.assertTrue(surum_tuple(__version__))

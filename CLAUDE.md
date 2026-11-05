@@ -23,7 +23,7 @@ Testler (GTK ve mpv gerekmez, sahte oynatıcı kullanır):
 ## Mimari (dlnacast/ paketi)
 - `__init__.py` – `__version__` ve `REPO` (GitHub deposu).
 - `__main__.py` – giriş noktası, `ui.App` başlatır.
-- `guncelleme.py` – GitHub'daki en yeni sürüm etiketini bulur; arayüzdeki "Güncelle" düğmesi `kur.sh --guncelle --ac`'ı terminalde açar.
+- `guncelleme.py` – GitHub'daki `main` dalının sürümünü okur; arayüzdeki "Güncelle" düğmesi `kur.sh --guncelle --ac`'ı terminalde açar.
 - `ui.py` – GTK4 arayüzü. Solda sunucular, sağda klasör içeriği, üstte hedef (renderer) seçimi, altta oynatma kontrolleri. Kuyruk (`QueueItem`), otomatik sonraki parça, seek/ses burada.
 - `controlpoint.py` – `ControlPoint`: SSDP keşfi, ContentDirectory gezintisi, AVTransport/RenderingControl ile renderer kontrolü. Hedef türüne göre yönlendirir: mpv, Chromecast veya DLNA renderer.
 - `mediaserver.py` – kendi UPnP MediaServer'ı (SSDP duyurusu + ContentDirectory SOAP + dosya akıtma). Sadece standart kütüphane.
@@ -73,7 +73,7 @@ Kaynak kod GitHub'da: https://github.com/serif453/dlnacast (public). Kullanıcı
 1. Değişikliği yap, `python -m unittest discover -s tests -v` geçsin; mümkünse `bash kur.sh --yerel .` ile sahte bir HOME'da kurulumu dene.
 2. `dlnacast/__init__.py` içindeki `__version__`'ı artır (hata düzeltme: 0.2.0 → 0.2.1, yeni özellik: 0.2.x → 0.3.0).
 3. `DEGISIKLIKLER.md`'nin en üstüne yeni sürüm başlığı ve kullanıcının anlayacağı dille 1-4 madde ekle (güncelleyici bu bölümü kullanıcıya gösterir).
-4. Commit (Türkçe mesaj), `vX.Y.Z` etiketi koy, `main` ve etiketi GitHub'a gönder. Güncelleyici en yüksek `vX.Y.Z` etiketini indirir; etiketsiz commit kullanıcıya ulaşmaz.
+4. Commit (Türkçe mesaj, "DLNA Cast X.Y.Z: ..." ile başlasın) ve `main`'e gönder. Güncelleyici `main`'in son commit'indeki `__version__`'ı okur, kurulu sürümden büyükse o commit'i indirir. Bu yüzden `main`'e sürüm artırmadan gönderilen değişiklik güncelleme olarak kullanıcıya ulaşmaz (yeni kurulumlara ulaşır); `main`'i her zaman çalışır halde tut. (Bulut oturumundan etiket/tag gönderilemiyor, bu yüzden etiket kullanılmıyor.)
 5. Kullanıcıya: programda "Güncelle" düğmesine basmasını ya da menüden "DLNA Cast Güncelle"yi açmasını ve neyi denemesi gerektiğini söyle.
 
 `kur.sh`'ı değiştirirken dikkat: kullanıcının bilgisayarındaki güncelleyici, indirdiği yeni sürümün `kur.sh`'ını değil, kurulu olan eski `kur.sh`'ı çalıştırır. Dosya listesi (`DOSYALAR`) ve indirme mantığı geriye uyumlu kalmalı.
