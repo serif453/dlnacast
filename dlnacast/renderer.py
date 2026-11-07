@@ -6,7 +6,6 @@ mpv işleri AsyncBridge'in asyncio döngüsüne aktarılır (bkz. MediaRenderer.
 """
 import concurrent.futures
 import asyncio
-import random
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -17,6 +16,7 @@ from xml.sax.saxutils import escape
 
 from .localplayer import LocalPlayer
 from .localserver import lan_ip
+from .olay import EventManager, Snapshot, SubscribeError
 from .mediaserver import CMS, CMS_SCPD, SERVER_STR, UpnpError, _Ssdp, scpd_xml, soap_fault, soap_response
 
 RENDERER_TYPE = "urn:schemas-upnp-org:device:MediaRenderer:1"
@@ -214,6 +214,7 @@ class MediaRenderer:
         self._loaded_uri = ""  # mpv'ye en son yüklenen adres
         self.volume = 100
         self.mute = False
+        self.events = EventManager(self._snapshot)  # abonelere durum değişikliği bildirimi
 
     # ---- yaşam döngüsü ----
     @property
@@ -235,11 +236,14 @@ class MediaRenderer:
         self._httpd = httpd
         self.port = httpd.server_address[1]
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.events = EventManager(self._snapshot)
+        self.events.start()
         if advertise:
             self._ssdp = _Ssdp(self, types=[RENDERER_TYPE, AVT, RCS, CMS])
             self._ssdp.start()
 
     def stop(self) -> None:
+        self.events.stop()
         if self._ssdp is not None:
             self._ssdp.shutdown()
             self._ssdp = None
@@ -285,6 +289,40 @@ class MediaRenderer:
             state = self._status()[2]
         return state
 
+    @staticmethod
+    def _actions(state: str, has_uri: bool) -> str:
+        return {"PLAYING": "Pause,Stop,Seek", "TRANSITIONING": "Stop",
+                "PAUSED_PLAYBACK": "Play,Stop,Seek"}.get(state, "Play" if has_uri else "")
+
+    def _snapshot(self) -> Snapshot:
+        """Olaylarla bildirilen değişkenlerin anlık değerleri (servis -> değişken -> değer)."""
+        alive = getattr(self.player, "alive", True)
+        _pos, dur, state, vol = self._status(with_volume=alive)
+        uri, meta = self.uri, self.meta
+        if state == "STOPPED" and not uri:
+            state = "NO_MEDIA_PRESENT"
+        if vol is None:
+            vol = self.volume
+        d = fmt_hms(dur)
+        n = "1" if uri else "0"
+        return {
+            "avt": {
+                "TransportState": state, "TransportStatus": "OK",
+                "CurrentPlayMode": "NORMAL", "TransportPlaySpeed": "1",
+                "PlaybackStorageMedium": "NETWORK" if uri else "NONE",
+                "NumberOfTracks": n, "CurrentTrack": n,
+                "CurrentTrackDuration": d, "CurrentMediaDuration": d,
+                "CurrentTrackURI": uri, "AVTransportURI": uri,
+                "CurrentTrackMetaData": meta, "AVTransportURIMetaData": meta,
+                "NextAVTransportURI": self.next_uri, "NextAVTransportURIMetaData": self.next_meta,
+                "CurrentTransportActions": self._actions(state, bool(uri)),
+            },
+            "rcs": {"Volume": str(max(0, min(100, int(vol)))), "Mute": "1" if self.mute else "0",
+                    "PresetNameList": "FactoryDefaults"},
+            "cms": {"SourceProtocolInfo": "", "SinkProtocolInfo": SINK_PROTOCOLS,
+                    "CurrentConnectionIDs": "0"},
+        }
+
     def _apply_audio(self) -> None:
         try:
             self._run(self.player.set_volume(self.volume))
@@ -318,6 +356,13 @@ class MediaRenderer:
 
     # ---- SOAP yönlendirme ----
     def handle(self, control_path: str, action: str, args: Dict[str, str]):
+        try:
+            return self._route(control_path, action, args)
+        finally:
+            if not action.startswith("Get"):  # durumu değiştiren komut: abonelere hemen bildir
+                self.events.changed()
+
+    def _route(self, control_path: str, action: str, args: Dict[str, str]):
         if control_path.endswith("/avt"):
             self._check_instance(args)
             return AVT, self._avt(action, args)
@@ -358,10 +403,7 @@ class MediaRenderer:
         if action == "GetTransportSettings":
             return [("PlayMode", "NORMAL"), ("RecQualityMode", "NOT_IMPLEMENTED")]
         if action == "GetCurrentTransportActions":
-            state = self._state()
-            acts = {"PLAYING": "Pause,Stop,Seek", "TRANSITIONING": "Stop",
-                    "PAUSED_PLAYBACK": "Play,Stop,Seek"}.get(state, "Play" if self.uri else "")
-            return [("Actions", acts)]
+            return [("Actions", self._actions(self._state(), bool(self.uri)))]
 
         with self._lock:  # buradan sonrakiler durumu değiştirir
             if action == "SetAVTransportURI":
@@ -374,7 +416,7 @@ class MediaRenderer:
                 self.title = didl_title(self.meta) or (title_from_uri(uri) if uri else "")
                 self.next_uri = self.next_meta = ""
                 return []
-            if action == "SetNextAVTransportURI":  # sıradaki parça kullanılmıyor, sadece saklanır
+            if action == "SetNextAVTransportURI":  # sıradaki parça henüz kullanılmıyor, saklanır
                 self.next_uri = args.get("NextURI", "").strip()
                 self.next_meta = args.get("NextURIMetaData", "")
                 return []
@@ -519,17 +561,42 @@ class _RendererHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self._static(True)
 
-    def do_SUBSCRIBE(self) -> None:  # olay aboneliği: kabul et ama olay gönderme
-        self.send_response(200)
-        self.send_header("SID", f"uuid:{random.getrandbits(64):016x}")
-        self.send_header("TIMEOUT", "Second-1800")
+    def _event_service(self) -> str:
+        path = self.path.split("?")[0]
+        svc = path[len("/event/"):] if path.startswith("/event/") else ""
+        return svc if svc in ("avt", "rcs", "cms") else ""
+
+    def _empty(self, status: int, extra: Optional[Dict[str, str]] = None) -> None:
+        self.send_response(status)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.send_header("Server", SERVER_STR)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def do_SUBSCRIBE(self) -> None:  # olay aboneliği (yeni ya da yenileme)
+        svc = self._event_service()
+        if not svc:
+            self._empty(404)
+            return
+        try:
+            sid, timeout = self.server.renderer.events.subscribe(
+                svc, self.client_address[0], self.headers)
+        except SubscribeError as e:
+            self._empty(e.status)
+            return
+        self._empty(200, {"SID": sid, "TIMEOUT": f"Second-{timeout}"})
+
     def do_UNSUBSCRIBE(self) -> None:
-        self.send_response(200)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        if not self._event_service():
+            self._empty(404)
+            return
+        try:
+            self.server.renderer.events.unsubscribe(self.headers)
+        except SubscribeError as e:
+            self._empty(e.status)
+            return
+        self._empty(200)
 
     def do_POST(self) -> None:
         r = self.server.renderer

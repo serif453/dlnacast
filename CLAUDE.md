@@ -19,7 +19,7 @@ Kullanıcının bilgisayarında program `kur.sh` ile `~/.local/share/dlnacast` k
 Testler (GTK ve mpv gerekmez, sahte oynatıcı kullanır):
     python -m unittest discover -s tests -v
 
-Şu an testler sadece renderer'ı kapsıyor. Arayüz (`ui.py`) için otomatik test yok; onu elle denemek gerekir. Teşhis için `./tani.sh` var.
+Testler renderer, olay bildirimi, Chromecast, küçük resim, mpv ve güncelleyiciyi kapsıyor. Arayüz (`ui.py`) için otomatik test yok; onu elle denemek gerekir. Teşhis için `./tani.sh` var.
 
 ## Mimari (dlnacast/ paketi)
 - `__init__.py` – `__version__` ve `REPO` (GitHub deposu).
@@ -35,6 +35,7 @@ Testler (GTK ve mpv gerekmez, sahte oynatıcı kullanır):
 - `renderer.py` – `MediaRenderer`: DLNA alıcı (renderer). Ağdaki telefon/bilgisayar bu programı "TV" gibi görür; AVTransport + RenderingControl + ConnectionManager servislerini sunar, oynatmayı kendi `LocalPlayer` (ayrı mpv penceresi) ile yapar. Arayüzde başlık çubuğundaki "Alıcı" anahtarıyla açılır/kapanır, açık/kapalı durumu config'de saklanır.
 - `cast.py` – `CastManager`: pychromecast ile keşif ve oynatma. Tek bir `CastBrowser` + `zeroconf` program boyunca açık kalır (yenilemede kapatılmaz); bulunan cihaza `cc.start()` ile hemen bağlanılır, bağlantılar yenilemede korunur. `_play_blocking` başarısız olursa `_reconnect` ile bir kez yeniden dener, sonra Türkçe `RuntimeError`. Cihaz IP'leri `known_hosts()` → config `cast_hosts` → `ControlPoint.cast_hosts` ile sonraki aramaya verilir. Testler sahte pychromecast ile: `tests/test_cast.py`.
 - `kucukresim.py` – küçük resimler: `from_url` (sadece http/https, en fazla 8 MB), `from_local` (önce KDE/freedesktop önbelleği, yoksa `ffmpeg` ile kare/kapak; başarısızsa `.yok` işareti). Önbellek `~/.cache/dlnacast/kucukresim`. Arayüzde `ThreadPoolExecutor(3)` ile yüklenir, `_thumb_gen` klasör değişince eski işleri iptal eder. `Entry.thumb` DIDL'deki `upnp:albumArtURI` ya da image/* `<res>`'ten gelir.
+- `olay.py` – UPnP olay bildirimi (GENA): `EventManager` abonelikleri tutar (`SUBSCRIBE`/yenileme/`UNSUBSCRIBE`), abone varken oynatıcıyı saniyede bir yoklar ve komutlardan sonra (`changed()`) hemen bakar; değişen değişkenleri AVT/RCS için `LastChange`, CMS için düz olarak `NOTIFY` ile gönderir. Yeni aboneye ~0.2 sn sonra tam durum (SEQ 0) gider. Güvenlik: geri çağrı adresi abonenin kendi IP'si olmalı, en fazla 32 abonelik. Renderer tarafı: `MediaRenderer._snapshot()`, `/event/avt|rcs|cms`. Testler: `tests/test_olay.py`.
 - `bridge.py` – `AsyncBridge`: asyncio döngüsünü ayrı thread'de çalıştırır, sonuçları `to_ui()` ile GTK ana thread'ine taşır.
 - `config.py` – `~/.config/dlnacast/config.json` (uuid, paylaşılan klasörler).
 - `tani.py` – teşhis betiği.
@@ -65,7 +66,7 @@ Paket dışı: `kur.sh` (kurulum/güncelleme/kaldırma, yedek alır ve hatada ge
 - [x] "Bu bilgisayar" (mpv) hedefi
 - [x] Chromecast sender (pychromecast); Chromecast receiver kapsam dışı
 - [x] DLNA renderer (bu bilgisayarı TV gibi gösterme), `renderer.py`
-- [ ] Renderer olay bildirimi (UPnP eventing / `LastChange`): şu an abonelik kabul ediliyor ama olay gönderilmiyor. Çoğu uygulama konumu yoklayarak (polling) öğreniyor; bazıları (durum değişimini olayla bekleyenler) gecikmeli görebilir.
+- [x] Renderer olay bildirimi (UPnP eventing / `LastChange`), `olay.py`. async-upnp-client `DmrDevice` ile denendi; gerçek telefon uygulamasıyla henüz denenmedi
 - [ ] Renderer: Chromecast receiver kapsam dışı; sıradaki parça (`SetNextAVTransportURI`) saklanıyor ama kullanılmıyor
 - [ ] `tani.py`'ye renderer kontrolü ekle
 - [ ] Alıcı için gerçek cihazlarla deneme (telefon uygulaması, Windows "Cihaza yayınla" vb.). Kodlama sırasında sadece sahte oynatıcıyla otomatik test yapıldı, gerçek mpv/ağ denenmedi

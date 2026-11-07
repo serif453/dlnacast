@@ -1,5 +1,10 @@
 # Değişiklikler
 
+## 0.7.0
+- Alıcı artık telefona anında haber verir: oynatma, duraklatma, durma, parçanın bitmesi ve ses değişikliği telefondaki uygulamada (BubbleUPnP, Kodi vb.) hemen görünür.
+- Telefon uygulamasının çubuğu ve düğmeleri bilgisayardaki oynatmayla daha uyumlu çalışır.
+- Güvenlik: bu bildirimler sadece abone olan cihazın kendisine gönderilir.
+
 ## 0.6.0
 - Klasörler ve sunucular küçük resimli ızgara olarak açılır: albüm kapakları, sunucunun küçük resimleri, bilgisayardaki videolardan bir kare. Sağ üstteki düğmeyle listeye geçebilirsin.
 - Chromecast daha güvenilir: TV bulunur bulunmaz bağlanılır, bağlantı yenilemede kopmaz, olmazsa kendiliğinden bir kez yeniden bağlanır.
