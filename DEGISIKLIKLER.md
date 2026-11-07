@@ -1,5 +1,11 @@
 # Değişiklikler
 
+## 0.9.1
+- Alıcı sekmesinde oynatıcı büyüdü: "Nasıl kullanılır?" kutusu kaldırıldı, video kalan bütün alanı kaplar.
+- Tam ekran artık bozulmaz: telefondan art arda video ve fotoğraf gönderirken tam ekranda kalır, sıradakini bekler.
+- Fotoğraf desteği: telefondan gönderilen fotoğraflar da açılır ve sen başka bir şey gönderene kadar ekranda kalır.
+- Tam ekranda fare durunca imleç de gizlenir.
+
 ## 0.9.0
 - Alıcı: telefondan gönderilen video artık ayrı pencerede değil, programın "Alıcı" sekmesinde oynar. Video gelince sekme kendiliğinden açılır.
 - Tam ekran: videonun altındaki ⛶ düğmesi, F tuşu ya da videoya çift tıklama. Çıkmak için Esc.
