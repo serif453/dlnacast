@@ -92,6 +92,13 @@ CSS = b"""
 .video-cubugu button { color: white; }
 .video-cubugu label { color: white; }
 .ses-dugmesi { font-size: 1.2em; font-weight: bold; }
+.foto-alani { background-color: black; }
+.foto-ok { background-color: rgba(0, 0, 0, 0.5); color: white; margin: 10px; }
+.serit { border-top: 1px solid alpha(currentColor, 0.12); background-color: alpha(currentColor, 0.03); }
+.serit.yuzen { background-color: rgba(0, 0, 0, 0.75); }
+.serit-dugme { padding: 3px; border-radius: 8px; opacity: 0.7; }
+.serit-dugme:hover { opacity: 1; }
+.serit-dugme.secili { opacity: 1; box-shadow: 0 0 0 3px @theme_selected_bg_color; }
 .adim { font-weight: bold; min-width: 26px; min-height: 26px; border-radius: 999px;
         background-color: alpha(currentColor, 0.1); }
 """
@@ -130,6 +137,12 @@ def is_playable(e: Entry) -> bool:
     return True
 
 
+def is_image(e: Entry) -> bool:
+    if e.is_container or not e.uri:
+        return False
+    return (e.mime or "").startswith("image/") or "imageItem" in e.upnp_class
+
+
 def local_media_files(folder: str) -> List[str]:
     """Klasördeki video/ses dosyaları (alt klasörler hariç), doğal sırayla."""
     try:
@@ -148,7 +161,7 @@ def local_media_files(folder: str) -> List[str]:
 
 
 def local_entries(folder: str) -> List[Entry]:
-    """Klasörün içeriği: önce alt klasörler, sonra video/ses dosyaları (doğal sırada)."""
+    """Klasörün içeriği: önce alt klasörler, sonra video/ses/resim dosyaları (doğal sırada)."""
     try:
         names = os.listdir(folder)
     except OSError as exc:
@@ -160,7 +173,7 @@ def local_entries(folder: str) -> List[Entry]:
         p = os.path.join(folder, n)
         if os.path.isdir(p):
             dirs.append(p)
-        elif os.path.isfile(p) and guess_mime(p).split("/")[0] in ("video", "audio"):
+        elif os.path.isfile(p) and guess_mime(p).split("/")[0] in ("video", "audio", "image"):
             files.append(p)
 
     def key(p: str) -> list:
@@ -242,6 +255,35 @@ class Tile(Gtk.FlowBoxChild):
             self.add_css_class("calan-karo")
         else:
             self.remove_css_class("calan-karo")
+
+
+class PhotoThumb(Gtk.Button):
+    """Fotoğraf şeridindeki küçük resim düğmesi."""
+
+    W, H = 96, 64
+
+    def __init__(self, ent: Entry) -> None:
+        super().__init__(css_classes=["flat", "serit-dugme"], focus_on_click=False)
+        self.data = ent
+        frame = Gtk.Overlay(css_classes=["kare"], overflow=Gtk.Overflow.HIDDEN)
+        frame.set_size_request(self.W, self.H)
+        frame.set_child(Gtk.Image(icon_name="image-x-generic-symbolic", pixel_size=24,
+                                  css_classes=["soluk"], halign=Gtk.Align.CENTER,
+                                  valign=Gtk.Align.CENTER))
+        self.pic = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, visible=False)
+        frame.add_overlay(self.pic)
+        self.set_child(frame)
+        self.set_tooltip_text(ent.title)
+
+    def set_thumb(self, texture) -> None:
+        self.pic.set_paintable(texture)
+        self.pic.set_visible(True)
+
+    def set_current(self, on: bool) -> None:
+        if on:
+            self.add_css_class("secili")
+        else:
+            self.remove_css_class("secili")
 
 
 DEVICE_LOOK = {  # tür -> (simge, açıklama)
@@ -519,6 +561,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self._thumbs = concurrent.futures.ThreadPoolExecutor(max_workers=3)
         self._thumb_gen = 0
         self._art_gen = 0
+        self.photos: List[Entry] = []  # fotoğraf görüntüleyicisindeki resimler
+        self.photo_idx = -1
+        self._photo_gen = 0
+        self._strip_gen = 0
+        self._photo_fs = False
+        self._strip_v0: Optional[float] = None
+        self._strip_x0: Optional[float] = None
 
         css = Gtk.CssProvider()
         css.load_from_data(CSS)
@@ -1086,6 +1135,12 @@ class MainWindow(Gtk.ApplicationWindow):
             self.fullscreen()
 
     def _on_fullscreened(self, *_args) -> None:
+        fs = self.is_fullscreen()
+        self.full_btn.set_icon_name("view-restore-symbolic" if fs else "view-fullscreen-symbolic")
+        self.full_btn.set_tooltip_text("Tam ekrandan çık (F11 / Esc)" if fs else "Tam ekran (F11)")
+        if not self.is_fullscreen() and self._photo_fs:  # pencere yöneticisiyle çıkıldı
+            self._photo_fs = False
+            self._apply_photo_fs(False)
         if not self.is_fullscreen() and self._video_fs:  # tam ekrandan çıkıldı (Esc, pencere yöneticisi)
             self._video_fs = False
             self._apply_video_fs(False)
@@ -1145,12 +1200,17 @@ class MainWindow(Gtk.ApplicationWindow):
             self.toggle_play()
 
     def on_arrow(self, delta: float):
-        if self._on_receiver_tab():
+        if self._photo_visible():
+            self.photo_step(1 if delta > 0 else -1)
+        elif self._on_receiver_tab():
             self._rp_seek_rel(delta)
         else:
             self.skip(delta)
 
     def on_fullscreen_key(self):
+        if self._photo_fs or self._photo_visible():
+            self.toggle_photo_fs()
+            return True
         if self.tabs.get_visible_child_name() != "alici" and not self._video_fs:
             return False
         if self.rplayer is None or self.renderer.player is not self.rplayer:
@@ -1159,6 +1219,12 @@ class MainWindow(Gtk.ApplicationWindow):
         return True
 
     def on_escape(self):
+        if self._photo_fs:
+            self.toggle_photo_fs()
+            return True
+        if self._photo_visible() and not self._video_fs:
+            self.close_photo()
+            return True
         if not self._video_fs:
             return False  # Esc başka yerde (açılır menü vb.) kullanılsın
         self.unfullscreen()
@@ -1220,7 +1286,7 @@ class MainWindow(Gtk.ApplicationWindow):
         topbar.append(self.play_all_btn)
 
         self.item_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)  # çalan satır ayrıca vurgulanır
-        self.item_list.set_placeholder(placeholder("Bu klasörde video ya da müzik yok."))
+        self.item_list.set_placeholder(placeholder("Bu klasörde video, müzik ya da resim yok."))
         self.item_list.connect("row-activated", self.on_entry_activated)
         liste = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["icerik"])
         liste.append(topbar)
@@ -1261,17 +1327,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self.view_stack.add_named(welcome, "karsilama")
         self.view_stack.add_named(liste, "liste")
         self.view_stack.add_named(loading, "yukleniyor")
+        self.view_stack.add_named(self._build_photo_view(), "foto")
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=260, vexpand=True,
                           shrink_start_child=False, resize_start_child=False)
+        self.browse_paned = paned
         paned.set_start_child(side_scroll)
         paned.set_end_child(self.view_stack)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.browse_bar, self.browse_sep = bar, Gtk.Separator()
+        self.browse_side = side_scroll
         box.append(bar)
-        box.append(Gtk.Separator())
+        box.append(self.browse_sep)
         box.append(paned)
-        box.append(self._build_player_bar())
+        self.player_bar = self._build_player_bar()
+        box.append(self.player_bar)
         return box
 
     def _build_player_bar(self) -> Gtk.Widget:
@@ -1320,6 +1391,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.vol_scale.set_tooltip_text("Ses düzeyi")
         right.append(Gtk.Image(icon_name="audio-volume-high-symbolic"))
         right.append(self.vol_scale)
+        self.full_btn = Gtk.Button(icon_name="view-fullscreen-symbolic", css_classes=["flat", "yuvarlak"],
+                                   tooltip_text="Tam ekran (F11)")
+        self.full_btn.connect("clicked", lambda _b: self.toggle_photo_fs())
+        right.append(self.full_btn)
 
         row1 = Gtk.CenterBox()
         row1.set_start_widget(now)
@@ -1754,9 +1829,6 @@ class MainWindow(Gtk.ApplicationWindow):
             save_config(self.config)
         others = len(self.renderers) - 1  # ilki her zaman "Bu bilgisayar"
         want = self._want_renderer
-        if want is None:  # ilk acilis: agda TV/Chromecast varsa varsayilan hedef o olsun
-            if others > 0 and self.picker.get_selected() == 0:
-                self.picker.set_selected(1)
         lost = (want not in (None, LOCAL_PLAYER_ID)
                 and not any(r.location == want for r in self.renderers))
         msg = f"Arama bitti: {len(self.servers)} sunucu, {others} oynatıcı cihaz bulundu."
@@ -1861,11 +1933,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.spinner.stop()
         folders = sum(1 for e in entries if e.is_container)
         playable = sum(1 for e in entries if is_playable(e))
+        images = sum(1 for e in entries if is_image(e))
         parts = []
         if folders:
             parts.append(f"{folders} klasör")
         if playable:
             parts.append(f"{playable} video/müzik")
+        if images:
+            parts.append(f"{images} resim")
         source = "Bu bilgisayar" if self.view_local else (self.current_server.name if self.current_server else "")
         trail = " / ".join([source] + [t for _, t in self.stack[:-1]])
         self.view_title.set_text(self.stack[-1][1] if self.stack else "")
@@ -1878,6 +1953,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if e.is_container:
             self.stack.append((e.id, e.title))
             self.load_current()
+            return
+        if is_image(e):  # resim: program içinde fotoğraf görüntüleyicide aç
+            self.open_photo(e)
             return
         if self.selected_renderer() is None:
             self.set_status("Önce üstteki \"Şurada oynat\" düğmesinden bir cihaz seç.")
@@ -2310,7 +2388,9 @@ class MainWindow(Gtk.ApplicationWindow):
         return time.monotonic() - self._play_t0 < SETTLE_SECONDS
 
     def go_back(self) -> None:
-        if len(self.stack) > 1:
+        if self._photo_visible():
+            self.close_photo()
+        elif len(self.stack) > 1:
             self.stack.pop()
             self.load_current()
 
@@ -2338,6 +2418,262 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.close()
 
+    # ---- fotoğraf görüntüleyici (Ağda Gez içinde) ----
+    def _build_photo_view(self) -> Gtk.Widget:
+        back = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text="Klasöre dön (Esc)",
+                          css_classes=["flat"])
+        back.connect("clicked", lambda *_: self.close_photo())
+        self.photo_title = Gtk.Label(xalign=0, ellipsize=3, hexpand=True, css_classes=["buyuk-baslik"])
+        self.photo_count = Gtk.Label(css_classes=["soluk"])
+        self.photo_cast = Gtk.ToggleButton(icon_name="video-display-symbolic", label="Cihazda göster",
+                                           tooltip_text="Açık fotoğraf, üstte seçili cihazda da görünsün")
+        self.photo_cast.connect("toggled", self.on_photo_cast)
+        top = self.photo_top = Gtk.Box(spacing=8, margin_top=10, margin_bottom=6, margin_start=12, margin_end=16)
+        for w in (back, self.photo_title, self.photo_count, self.photo_cast):
+            top.append(w)
+
+        self.photo_pic = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True,
+                                     hexpand=True, vexpand=True)
+        self.photo_spin = Gtk.Spinner(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
+                                      width_request=32, height_request=32)
+        area = Gtk.Overlay(child=self.photo_pic, css_classes=["foto-alani"], hexpand=True, vexpand=True)
+        area.add_overlay(self.photo_spin)
+        for icon, side, delta, tip in (("go-previous-symbolic", Gtk.Align.START, -1, "Önceki (←)"),
+                                       ("go-next-symbolic", Gtk.Align.END, 1, "Sonraki (→)")):
+            btn = Gtk.Button(icon_name=icon, halign=side, valign=Gtk.Align.CENTER, tooltip_text=tip,
+                             css_classes=["yuvarlak", "foto-ok"], focus_on_click=False)
+            btn.connect("clicked", lambda _b, d=delta: self.photo_step(d))
+            area.add_overlay(btn)
+
+        # tam ekranda şerit, fare altta gezinince beliren bir panel olur
+        self.strip_rev = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP,
+                                      valign=Gtk.Align.END, halign=Gtk.Align.FILL, reveal_child=False)
+        area.add_overlay(self.strip_rev)
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", self._on_photo_motion)
+        motion.connect("leave", lambda *_: self._strip_reveal(False))
+        area.add_controller(motion)
+        self.photo_area = area
+        self.strip_box = Gtk.Box(spacing=6, margin_top=8, margin_bottom=8, margin_start=10, margin_end=10)
+        self.strip_scroll = Gtk.ScrolledWindow(child=self.strip_box, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                               hscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+                                               propagate_natural_height=True, css_classes=["serit"])
+        view = self.photo_view = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        view.append(top)
+        view.append(area)
+        view.append(self.strip_scroll)
+        return view
+
+    def _photo_visible(self) -> bool:
+        return (self.tabs.get_visible_child_name() == "gez"
+                and self.view_stack.get_visible_child_name() == "foto")
+
+    def open_photo(self, ent: Entry) -> None:
+        """Resmi büyük açar; klasördeki diğer resimler altta şerit olarak sıralanır."""
+        self.photos = [x for x in self.entries if is_image(x)]
+        if ent not in self.photos:
+            return
+        while (child := self.strip_box.get_first_child()) is not None:
+            self.strip_box.remove(child)
+        tiles = {id(r.data): r for r in self.entry_rows if isinstance(r, Tile)}
+        self._strip_gen += 1
+        gen = self._strip_gen
+        for i, e in enumerate(self.photos):
+            btn = PhotoThumb(e)
+            btn.connect("clicked", lambda _b, i=i: self.show_photo(i))
+            self.strip_box.append(btn)
+            tile = tiles.get(id(e))
+            tex = tile.pic.get_paintable() if tile is not None else None
+            if tex is not None:
+                btn.set_thumb(tex)  # ızgaradan hazır
+            else:
+                self._thumbs.submit(self._strip_job, gen, i, e, self.view_local)
+        self.view_stack.set_visible_child_name("foto")
+        self.show_photo(self.photos.index(ent))
+
+    def _strip_job(self, gen: int, idx: int, e: Entry, local: bool) -> None:
+        if gen != self._strip_gen:
+            return
+        try:
+            path = self._thumb_path(e, local)
+            if not path:
+                return
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, PhotoThumb.W * 2, PhotoThumb.H * 2, True)
+            pix = pix.apply_embedded_orientation() or pix
+        except Exception:  # noqa: BLE001  (şeritte simge kalır)
+            return
+        to_ui(self._set_strip_thumb, gen, idx, pix)
+
+    def _set_strip_thumb(self, gen: int, idx: int, pix) -> None:
+        if gen != self._strip_gen:
+            return
+        btn = self.strip_box.get_first_child()
+        for _ in range(idx):
+            btn = btn.get_next_sibling() if btn is not None else None
+        if btn is not None:
+            btn.set_thumb(Gdk.Texture.new_for_pixbuf(pix))
+
+    def show_photo(self, idx: int) -> None:
+        if not 0 <= idx < len(self.photos):
+            return
+        self.photo_idx = idx
+        e = self.photos[idx]
+        self.photo_title.set_text(e.title)
+        self.photo_count.set_text(f"{idx + 1} / {len(self.photos)}")
+        child = self.strip_box.get_first_child()
+        i = 0
+        while child is not None:
+            child.set_current(i == idx)
+            if i == idx:
+                GLib.idle_add(self._scroll_strip_to, child)
+            child, i = child.get_next_sibling(), i + 1
+        self._photo_gen += 1
+        self.photo_spin.start()
+        self._thumbs.submit(self._photo_job, self._photo_gen, e, self.view_local)
+        if self.photo_cast.get_active():
+            self._cast_photo(e)
+
+    def _scroll_strip_to(self, btn: Gtk.Widget) -> bool:
+        adj = self.strip_scroll.get_hadjustment()
+        try:
+            x = btn.translate_coordinates(self.strip_box, 0, 0)[0]
+        except Exception:  # noqa: BLE001
+            return False
+        target = x + btn.get_width() / 2 - adj.get_page_size() / 2
+        adj.set_value(max(adj.get_lower(), min(target, adj.get_upper() - adj.get_page_size())))
+        return False
+
+    def _photo_job(self, gen: int, e: Entry, local: bool) -> None:
+        if gen != self._photo_gen:
+            return  # bu arada başka foto seçildi
+        try:
+            path = e.id if local else kucukresim.from_url(e.uri, timeout=30.0, max_bytes=64 * 1024 * 1024)
+            if not path:
+                raise RuntimeError("Fotoğraf indirilemedi.")
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 3000, 3000, True)
+            pix = pix.apply_embedded_orientation() or pix
+        except Exception as exc:  # noqa: BLE001
+            to_ui(self._photo_failed, gen, e.title, exc)
+            return
+        to_ui(self._set_photo, gen, pix)
+
+    def _set_photo(self, gen: int, pix) -> None:
+        if gen == self._photo_gen:
+            self.photo_pic.set_paintable(Gdk.Texture.new_for_pixbuf(pix))
+            self.photo_spin.stop()
+
+    def _photo_failed(self, gen: int, title: str, exc: Exception) -> None:
+        if gen == self._photo_gen:
+            self.photo_spin.stop()
+            self.show_toast(f"\"{title}\" açılamadı: {exc}", error=True)
+
+    def photo_step(self, delta: int) -> None:
+        if self.photos:
+            self.show_photo(max(0, min(len(self.photos) - 1, self.photo_idx + delta)))
+
+    def toggle_photo_fs(self) -> None:
+        """Tam ekran: fotoğraf görünümündeyse sadece fotoğraf kalır; çıkınca her şey geri gelir."""
+        if self.is_fullscreen():
+            self.unfullscreen()
+            if self._photo_fs:
+                self._photo_fs = False
+                self._apply_photo_fs(False)
+            return
+        if self._photo_visible():
+            self._photo_fs = True
+            self._apply_photo_fs(True)
+        self.fullscreen()
+
+    def _apply_photo_fs(self, on: bool) -> None:
+        titlebar = self.get_titlebar()
+        if titlebar is not None:
+            titlebar.set_visible(not on)
+        for w in (self.browse_bar, self.browse_sep, self.player_bar, self.photo_top):
+            w.set_visible(not on)
+        # kenar paneli gizlemek yerine sıfır genişliğe daraltılır (gizli çocuk GTK uyarısı üretiyor)
+        self.browse_paned.set_shrink_start_child(on)
+        self.browse_paned.set_position(0 if on else 260)
+        if on:  # şerit alttaki panele taşınır, fare altına gelince açılır
+            self.photo_view.remove(self.strip_scroll)
+            self.strip_scroll.add_css_class("yuzen")
+            self.strip_scroll.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)  # çubuk gizli
+            self.strip_rev.set_child(self.strip_scroll)
+        else:
+            self.strip_rev.set_reveal_child(False)
+            self.strip_rev.set_child(None)
+            self.strip_scroll.remove_css_class("yuzen")
+            self.strip_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+            self.photo_view.append(self.strip_scroll)
+
+    def _on_photo_motion(self, _ctl, x: float, y: float) -> None:
+        if not self._photo_fs:
+            return
+        h = self.photo_area.get_height()
+        shown = self.strip_rev.get_reveal_child()
+        self._strip_reveal(y > h - (130 if shown else 120))  # açıkken biraz tolerans
+        if shown and y > h - 130:  # şerit açıkken fare sağa/sola gidince şerit de akar
+            adj = self.strip_scroll.get_hadjustment()
+            w = self.photo_area.get_width()
+            span = adj.get_upper() - adj.get_page_size()
+            if self._strip_v0 is None or w <= 160 or span <= 0:
+                return  # şerit henüz açık fotoğrafa kaydırılmadı
+            if self._strip_x0 is None:
+                self._strip_x0 = x  # fare buradan sonra ne kadar giderse şerit o kadar akar
+            else:
+                # başlangıç noktasından sola doğru şeridin başına, sağa doğru sonuna uzanır:
+                # ekranın en sol/sağ kenarı şeridin ilk/son fotoğrafıdır
+                x0, v0, edge = self._strip_x0, self._strip_v0, 24.0
+                if x < x0:
+                    t = max(0.0, (x - edge) / max(1.0, x0 - edge))
+                    val = v0 * t
+                else:
+                    t = max(0.0, (w - edge - x) / max(1.0, w - edge - x0))
+                    val = span - (span - v0) * t
+                adj.set_value(max(0.0, min(span, val)))
+
+    def _strip_reveal(self, on: bool) -> None:
+        if not self._photo_fs or on == self.strip_rev.get_reveal_child():
+            return
+        self.strip_rev.set_reveal_child(on)
+        self._strip_v0 = self._strip_x0 = None
+        if on and 0 <= self.photo_idx < len(self.photos):
+            btn = self.strip_box.get_first_child()
+            for _ in range(self.photo_idx):
+                btn = btn.get_next_sibling() if btn is not None else None
+            if btn is not None:
+                GLib.timeout_add(280, self._anchor_strip, btn)  # açılma animasyonu bitince
+
+    def _anchor_strip(self, btn: Gtk.Widget) -> bool:
+        """Şerit her açılışta açık fotoğrafın konumuna gelir; fare oradan başlayarak gezdirir."""
+        self._scroll_strip_to(btn)
+        self._strip_v0 = self.strip_scroll.get_hadjustment().get_value()
+        self._strip_x0 = None
+        return False
+
+    def close_photo(self) -> None:
+        if self._photo_fs and self.is_fullscreen():
+            self.toggle_photo_fs()
+        self._photo_gen += 1
+        self._strip_gen += 1
+        self.photo_spin.stop()
+        self.view_stack.set_visible_child_name("liste")
+
+    def on_photo_cast(self, btn: Gtk.ToggleButton) -> None:
+        if not btn.get_active() or not 0 <= self.photo_idx < len(self.photos):
+            return
+        if self.selected_renderer() is None:
+            btn.set_active(False)
+            self.show_toast("Önce üstteki \"Şurada oynat\" düğmesinden bir cihaz seç.", error=True)
+            return
+        self._cast_photo(self.photos[self.photo_idx])
+
+    def _cast_photo(self, e: Entry) -> None:
+        """Açık fotoğrafı seçili cihaza gönderir (kuyruk tek resimlik olur)."""
+        if self.selected_renderer() is None:
+            return
+        self.set_queue([self.make_item(e)], [None])
+        self.start_item(0)
+
     # ---- ızgara ve küçük resimler ----
     def _update_view_btn(self) -> None:
         self.view_btn.set_icon_name("view-list-symbolic" if self.grid_mode else "view-grid-symbolic")
@@ -2356,30 +2692,39 @@ class MainWindow(Gtk.ApplicationWindow):
         """Küçük resimleri arka planda sırayla yükler; klasör değişirse eski işler bırakılır."""
         self._thumb_gen += 1
         gen = self._thumb_gen
-        for tile in tiles:
+        for i, tile in enumerate(tiles):  # iş parçacığına widget değil sıra numarası verilir
             e = tile.data
-            if e.is_container or (not local and not e.thumb):
+            if e.is_container or (not local and not (e.thumb or is_image(e))):
                 continue
-            self._thumbs.submit(self._thumb_job, gen, tile, e, local)
+            self._thumbs.submit(self._thumb_job, gen, i, e, local)
 
-    def _thumb_job(self, gen: int, tile: Tile, e: Entry, local: bool) -> None:
+    def _thumb_path(self, e: Entry, local: bool) -> Optional[str]:
+        """Küçük resmin dosya yolu (engelleyici; arka plan thread'inde çağrılır)."""
+        if is_image(e):
+            if local:
+                return kucukresim.freedesktop(e.id) or e.id
+            return kucukresim.from_url(e.thumb or e.uri)
+        if local:
+            return kucukresim.from_local(e.id, audio=entry_icon(e) == "audio-x-generic-symbolic")
+        return kucukresim.from_url(e.thumb) if e.thumb else None
+
+    def _thumb_job(self, gen: int, idx: int, e: Entry, local: bool) -> None:
         if gen != self._thumb_gen:
             return  # başka klasöre geçildi
         try:
-            if local:
-                path = kucukresim.from_local(e.id, audio=entry_icon(e) == "audio-x-generic-symbolic")
-            else:
-                path = kucukresim.from_url(e.thumb)
+            path = self._thumb_path(e, local)
             if not path:
                 return
             pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, Tile.W * 2, Tile.H * 2, True)
         except Exception:  # noqa: BLE001  (resim yoksa simge kalır)
             return
-        to_ui(self._set_thumb, gen, tile, pix)
+        to_ui(self._set_thumb, gen, idx, pix)
 
-    def _set_thumb(self, gen: int, tile: Tile, pix) -> None:
-        if gen == self._thumb_gen and tile.get_parent() is not None:
-            tile.set_thumb(Gdk.Texture.new_for_pixbuf(pix))
+    def _set_thumb(self, gen: int, idx: int, pix) -> None:
+        if gen == self._thumb_gen and idx < len(self.entry_rows):
+            tile = self.entry_rows[idx]
+            if isinstance(tile, Tile) and tile.get_parent() is not None:
+                tile.set_thumb(Gdk.Texture.new_for_pixbuf(pix))
 
     # ---- kısayol, sürükle-bırak, ayar ----
     def _key(self, _widget, _args, fn) -> bool:

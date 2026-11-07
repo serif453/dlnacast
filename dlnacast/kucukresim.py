@@ -26,7 +26,7 @@ def _missing_marker(out: str) -> str:
     return out + ".yok"  # küçük resim çıkarılamadı; her açılışta yeniden denenmesin
 
 
-def from_url(url: str, timeout: float = 8.0) -> Optional[str]:
+def from_url(url: str, timeout: float = 8.0, max_bytes: int = MAX_BYTES) -> Optional[str]:
     """Ağdaki resmi indirip önbelleğe yazar; dosya yolunu döndürür."""
     if not url.lower().startswith(("http://", "https://")):
         return None
@@ -35,8 +35,8 @@ def from_url(url: str, timeout: float = 8.0) -> Optional[str]:
         return out
     req = urllib.request.Request(url, headers={"User-Agent": "DLNACast"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = r.read(MAX_BYTES + 1)
-    if not data or len(data) > MAX_BYTES:
+        data = r.read(max_bytes + 1)
+    if not data or len(data) > max_bytes:
         return None
     tmp = out + ".tmp"
     with open(tmp, "wb") as f:

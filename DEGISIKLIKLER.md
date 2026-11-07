@@ -1,5 +1,11 @@
 # Değişiklikler
 
+## 0.11.0
+- Ağda Gez: bir resme tıklayınca fotoğraf programın içinde büyük açılır; klasördeki diğer resimler altta küçük resim şeridi olarak sıralanır. ← → tuşları, yan oklar ya da şeritten gezebilirsin; Esc klasöre döner.
+- Tam ekran: ses çubuğunun yanındaki düğme, F11 ya da F tuşu. Tam ekranda fareyi alt kenara götürünce şerit açılır, fareyi sağa sola gezdirince kayar.
+- "Cihazda göster" düğmesiyle gezdiğin fotoğraflar seçili TV'de de görünür. Bilgisayardan açtığın klasörlerde de resimler listelenir.
+- Ağda Gez'de "Şurada oynat" artık "Bu bilgisayar" ile başlar.
+
 ## 0.10.0
 - Dönüştürme (transcode): TV'nin açamadığı videolar (HEVC, 10-bit, MKV, DTS ses vb.) ffmpeg ile anında uygun biçime çevrilip gönderilir. Yayınla sekmesinde "Gelişmiş seçenekler" altındaki "Dönüştür" anahtarıyla açılır.
 - Chromecast'te uyumsuz dosyalar anahtar kapalıyken bile kendiliğinden dönüştürülür; uyumlu dosyalara dokunulmaz.
