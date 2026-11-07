@@ -35,7 +35,8 @@ SINK_PROTOCOLS = ",".join(
         "video/mpeg", "video/mp2t", "video/x-ms-wmv", "video/3gpp", "video/x-flv",
         "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/aac", "audio/flac", "audio/x-flac",
         "audio/ogg", "audio/opus", "audio/wav", "audio/x-wav", "audio/L16",
-        "application/ogg", "application/vnd.apple.mpegurl", "application/x-mpegURL"))
+        "application/ogg", "application/vnd.apple.mpegurl", "application/x-mpegURL",
+        "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"))
 
 
 # ---------------- yardımcılar ----------------

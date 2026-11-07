@@ -62,7 +62,7 @@ class EmbeddedPlayer:
         self.mpv = mpv.MPV(vo="libmpv", idle=True, keep_open="no", ytdl=False,
                            osc=False, input_default_bindings=False, input_vo_keyboard=False,
                            load_scripts=False, config=False, hwdec="auto-safe",
-                           audio_display="no")
+                           audio_display="no", image_display_duration="inf")  # foto açık kalsın
         self.widget = Gtk.GLArea(hexpand=True, vexpand=True, auto_render=True)
         self.widget.connect("realize", self._on_realize)
         self.widget.connect("unrealize", self._on_unrealize)

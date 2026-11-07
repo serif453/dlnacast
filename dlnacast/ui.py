@@ -848,32 +848,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.rcv_video_card = self._build_video_card()
         page.append(self.rcv_video_card)
 
-        how, hbox = card("Nasıl kullanılır?")
-        steps = Gtk.Grid(column_spacing=10, row_spacing=8)
-        for i, text in enumerate(("Yukarıdaki \"Alıcıyı aç\" anahtarını aç.",
-                                  "Telefonda bir DLNA uygulaması aç (BubbleUPnP, VLC, Kodi, "
-                                  "Windows \"Cihaza yayınla\" vb.).",
-                                  f"Cihaz listesinde \"{self.renderer.name}\" adını seç ve bir video gönder.",
-                                  "Video aşağıdaki oynatıcıda açılır (⛶ ya da F tuşu: tam ekran); "
-                                  "müzik penceresiz çalar.")):
-            steps.attach(Gtk.Label(label=str(i + 1), css_classes=["adim"], valign=Gtk.Align.START), 0, i, 1, 1)
-            steps.attach(Gtk.Label(label=text, xalign=0, wrap=True, hexpand=True), 1, i, 1, 1)
-        hbox.append(steps)
-        hbox.append(Gtk.Label(label="Telefonda görünmüyorsa: aynı Wi-Fi ağında olduğunuzdan ve güvenlik "
-                                    "duvarının UDP 1900 portuna izin verdiğinden emin ol.",
-                              xalign=0, wrap=True, css_classes=["soluk", "kucuk"]))
-        page.append(how)
-        self.rcv_how = how
-
-        log, lbox = card("Son olaylar")
-        log.set_vexpand(True)
+        log, lbox = card("Son olaylar", spacing=4)
         self.rcv_log = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.rcv_log.set_placeholder(placeholder("Henüz bir şey olmadı."))
-        lbox.append(Gtk.ScrolledWindow(child=self.rcv_log, vexpand=True, min_content_height=80,
+        self.rcv_log.set_placeholder(placeholder("Henüz bir şey olmadı. Telefonda bu bilgisayar "
+                                                 f"\"{self.renderer.name}\" adıyla görünür."))
+        lbox.append(Gtk.ScrolledWindow(child=self.rcv_log, min_content_height=70, max_content_height=70,
                                        hscrollbar_policy=Gtk.PolicyType.NEVER))
         page.append(log)
         self.rcv_log_card = log
-        return page_scroll(page)
+        # Kaydırma yok: oynatıcı kalan bütün alanı kaplasın.
+        return page
 
     # ---------------- alıcının program içi oynatıcısı ----------------
     def _pick_renderer_player(self):
@@ -888,6 +872,8 @@ class MainWindow(Gtk.ApplicationWindow):
     def on_embed_switch(self, switch: Gtk.Switch, _pspec) -> None:
         self.config["alici_gomulu"] = switch.get_active()
         save_config(self.config)
+        if self._video_fs and not switch.get_active():
+            self.unfullscreen()
         old = self.renderer.player
         new = self._pick_renderer_player()
         if new is not old:
@@ -898,16 +884,17 @@ class MainWindow(Gtk.ApplicationWindow):
         self._update_video_bar()
 
     def _build_video_card(self) -> Gtk.Widget:
-        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["kart"], spacing=8)
+        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["kart"], spacing=8, vexpand=True)
         self.video_title = Gtk.Label(label="Oynatıcı", xalign=0, ellipsize=3, css_classes=["kart-baslik"])
         frame.append(self.video_title)
         self.video_area = Gtk.Overlay(css_classes=["video-alani"], overflow=Gtk.Overflow.HIDDEN,
                                       vexpand=True)
-        self.video_area.set_size_request(-1, 380)
+        self.video_area.set_size_request(-1, 300)
         self.video_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
         empty = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.CENTER,
                         halign=Gtk.Align.CENTER, css_classes=["video-bos"])
-        empty.append(Gtk.Image(icon_name="video-display-symbolic", pixel_size=56))
+        self.video_empty_icon = Gtk.Image(icon_name="video-display-symbolic", pixel_size=56)
+        empty.append(self.video_empty_icon)
         self.video_empty_label = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
         empty.append(self.video_empty_label)
         self.video_stack.add_named(empty, "bos")
@@ -987,8 +974,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._rp_new = ""
             self.video_stack.set_visible_child_name("bos")
             self.video_title.set_text("Oynatıcı")
-            if self._video_fs:
-                self.unfullscreen()
+            # Tam ekran bozulmaz: telefon art arda foto/video gönderirken arada kısa süre boş kalır.
         self._update_video_bar()
 
     def _rp_active(self) -> bool:
@@ -998,9 +984,14 @@ class MainWindow(Gtk.ApplicationWindow):
     def _update_video_bar(self) -> bool:
         if self.rplayer is None:
             return False
-        self.video_empty_label.set_text(
-            "Telefondan gönderilen video burada oynar." if self.renderer.running
-            else "Alıcı kapalı. Yukarıdaki \"Alıcıyı aç\" anahtarını aç.")
+        if self._video_fs:
+            empty = ""  # tam ekranda sıradakini beklerken sade siyah ekran
+        elif self.renderer.running:
+            empty = "Telefondan gönderilen video ve fotoğraf burada açılır."
+        else:
+            empty = "Alıcı kapalı. Yukarıdaki \"Alıcıyı aç\" anahtarını aç."
+        self.video_empty_label.set_text(empty)
+        self.video_empty_icon.set_visible(bool(empty))
         if not self._rp_active():
             for w in (self.v_pos, self.v_dur):
                 w.set_text("0:00")
@@ -1072,7 +1063,7 @@ class MainWindow(Gtk.ApplicationWindow):
         titlebar = self.get_titlebar()
         if titlebar is not None:
             titlebar.set_visible(not on)
-        for w in (self.rcv_top, self.rcv_how, self.rcv_log_card, self.video_title):
+        for w in (self.rcv_top, self.rcv_log_card, self.video_title):
             w.set_visible(not on)
         m = 0 if on else 12
         for setter in (self.rcv_page.set_margin_top, self.rcv_page.set_margin_bottom,
@@ -1089,12 +1080,15 @@ class MainWindow(Gtk.ApplicationWindow):
                 GLib.source_remove(self._bar_hide_src)
                 self._bar_hide_src = 0
             self.video_bar.set_reveal_child(True)
+            self.video_area.set_cursor(None)
+            self._update_video_bar()
         self.v_full.set_icon_name("view-restore-symbolic" if on else "view-fullscreen-symbolic")
         self.v_full.set_tooltip_text("Tam ekrandan çık (Esc)" if on else "Tam ekran (F)")
 
     def _show_video_bar(self) -> None:
-        """Tam ekranda fare oynayınca çubuğu göster, 3 sn sonra gizle."""
+        """Tam ekranda fare oynayınca çubuğu ve imleci göster, 3 sn sonra gizle."""
         self.video_bar.set_reveal_child(True)
+        self.video_area.set_cursor(None)
         if not self._video_fs:
             return
         if self._bar_hide_src:
@@ -1105,6 +1099,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._bar_hide_src = 0
         if self._video_fs:
             self.video_bar.set_reveal_child(False)
+            self.video_area.set_cursor_from_name("none")
         return False
 
     # ---- alıcı sekmesindeyken tuşlar oynatıcıya gider ----
@@ -1565,6 +1560,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 return
             self.show_toast(f"Alıcı açık: telefonunda \"{self.renderer.name}\" adıyla görünür.")
         else:
+            if self._video_fs:
+                self.unfullscreen()
             self.renderer.stop()
             self.show_toast("Alıcı kapatıldı.")
         self.alici_label.set_visible(want)

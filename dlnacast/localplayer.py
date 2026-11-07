@@ -51,7 +51,7 @@ class LocalPlayer:
         except FileNotFoundError:
             pass
         self._proc = subprocess.Popen(
-            [exe, "--idle=yes", "--force-window=no", "--keep-open=no", "--ytdl=no",
+            [exe, "--idle=yes", "--force-window=no", "--keep-open=no", "--ytdl=no", "--image-display-duration=inf",
              f"--title={self._title}", f"--input-ipc-server={self._sock}"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
