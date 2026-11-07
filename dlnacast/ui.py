@@ -1,7 +1,9 @@
 """GTK4 arayüzü: dört sekme (Yayınla, Alıcı, Ağda Gez, Sunucu)."""
 import os
 import re
+import shutil
 import socket
+import subprocess
 import threading
 import asyncio
 import concurrent.futures
@@ -33,6 +35,7 @@ SKIP_SECONDS = 10
 POLL_SECONDS = 1
 VOLUME_EVERY = 10  # ses değerini kaç yoklamada bir oku
 SETTLE_SECONDS = 3.0  # yeni parça başlatıldıktan sonra eski durum bilgisini yok say
+RESUME_MIN = 180.0  # bundan kısa videolarda konum saklanmaz (saniye)
 END_TOLERANCE = 6.0  # parça bitmeden bu kadar saniye önce durduysa "bitti" sayılmaz
 
 # Tema renklerinden türetilir; açık ve koyu temada aynı şekilde çalışır.
@@ -95,6 +98,9 @@ CSS = b"""
 .foto-alani { background-color: black; }
 .foto-ok { background-color: rgba(0, 0, 0, 0.5); color: white; margin: 10px; }
 .serit { border-top: 1px solid alpha(currentColor, 0.12); background-color: alpha(currentColor, 0.03); }
+.calan-bilgi { background-color: rgba(0, 0, 0, 0.6); border-radius: 12px; padding: 10px 14px; margin: 18px; }
+.calan-bilgi label { color: white; }
+.soluk-ikon { color: rgba(255, 255, 255, 0.45); }
 .serit.yuzen { background-color: rgba(0, 0, 0, 0.75); }
 .serit-dugme { padding: 3px; border-radius: 8px; opacity: 0.7; }
 .serit-dugme:hover { opacity: 1; }
@@ -568,6 +574,17 @@ class MainWindow(Gtk.ApplicationWindow):
         self._photo_fs = False
         self._strip_v0: Optional[float] = None
         self._strip_x0: Optional[float] = None
+        self.strip_entries: List[Entry] = []  # şeritteki öğeler (fotoğraflar ya da kuyruk)
+        self.viewer_mode = "foto"  # görüntüleyici: "foto" ya da "video"
+        self._queue_entries: Optional[List[Entry]] = None  # kuyrukla aynı sırada, görüntüleyici için
+        self.vplayer: Optional["gomulu.EmbeddedPlayer"] = None  # Ağda Gez'in program içi oynatıcısı
+        self._vplayer_tried = False
+        self._ext_local = None  # "Bu bilgisayar" için ayrı pencereli mpv (LocalPlayer)
+        self._resume_to: Optional[float] = None  # başlayınca atlanacak kayıtlı konum
+        self._pos_saved = 0.0
+        self._cursor_src = 0
+        self._click_src = 0
+        self.config.setdefault("konumlar", {})
 
         css = Gtk.CssProvider()
         css.load_from_data(CSS)
@@ -643,6 +660,7 @@ class MainWindow(Gtk.ApplicationWindow):
         for phase, pairs in (
                 (Gtk.PropagationPhase.CAPTURE, (("space", self.on_space), ("BackSpace", self.go_back),
                                                 ("<Control>o", self.open_file), ("F5", self.refresh),
+                                                ("Page_Down", lambda: self.on_page(1)), ("Page_Up", lambda: self.on_page(-1)),
                                                 ("F11", self.on_fullscreen_key), ("f", self.on_fullscreen_key),
                                                 ("Escape", self.on_escape))),
                 (Gtk.PropagationPhase.BUBBLE, (("Left", lambda: self.on_arrow(-SKIP_SECONDS)),
@@ -1200,7 +1218,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.toggle_play()
 
     def on_arrow(self, delta: float):
-        if self._photo_visible():
+        if self._photo_visible() and self.viewer_mode == "foto":
             self.photo_step(1 if delta > 0 else -1)
         elif self._on_receiver_tab():
             self._rp_seek_rel(delta)
@@ -1217,6 +1235,11 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
         self.toggle_video_fullscreen()
         return True
+
+    def on_page(self, delta: int):
+        if not self._photo_visible():
+            return False  # başka yerde sayfa tuşları kaydırsın
+        self._viewer_step(delta)
 
     def on_escape(self):
         if self._photo_fs:
@@ -1357,6 +1380,11 @@ class MainWindow(Gtk.ApplicationWindow):
         now_txt.append(self.now_sub)
         now = Gtk.Box(spacing=10)
         now.set_size_request(280, -1)
+        now.set_tooltip_text("Oynatıcı görünümünü aç")
+        now.set_cursor(Gdk.Cursor.new_from_name("pointer"))
+        now_click = Gtk.GestureClick()
+        now_click.connect("pressed", lambda *_: self.reopen_viewer())
+        now.add_controller(now_click)
         now.append(self.now_icon)
         now.append(now_txt)
 
@@ -1682,9 +1710,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self._update_receiver_info()
 
     def on_close(self, *_args) -> bool:
+        self._save_position(True)
         self.renderer.stop()
         if self.rplayer is not None:
             self.rplayer.terminate()
+        if self.vplayer is not None:
+            if self.cp.player is self.vplayer and self._ext_local is not None:
+                self.cp.player = self._ext_local  # sonlanan oynatıcıya komut gitmesin
+            self.vplayer.terminate()
         if self._ext_player is not None:
             self._ext_player.close()
         self.mserver.stop()
@@ -1966,6 +1999,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Tıklanan öğeden başlayarak klasörün tamamı kuyruğa girer.
         items: List[QueueItem] = []
         rows: List[Optional[Row]] = []
+        ents: List[Entry] = []
         start = 0
         if is_playable(e):
             for ent, r in zip(self.entries, self.entry_rows):
@@ -1974,10 +2008,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 if is_playable(ent):
                     items.append(self.make_item(ent))
                     rows.append(r)
-        else:  # örn. resim: tek başına oynat
-            items, rows = [self.make_item(e)], [row]
-        self.set_queue(items, rows)
-        self.start_item(start)
+                    ents.append(ent)
+        else:
+            items, rows, ents = [self.make_item(e)], [row], [e]
+        self._play_queue(items, rows, ents, start)
 
     def make_item(self, ent: Entry) -> QueueItem:
         if self.view_local:  # yerel dosya: oynatılırken ağa açılır
@@ -1989,16 +2023,16 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.selected_renderer() is None:
             self.set_status("Önce üstteki \"Şurada oynat\" düğmesinden bir cihaz seç.")
             return
-        items, rows = [], []
+        items, rows, ents = [], [], []
         for ent, r in zip(self.entries, self.entry_rows):
             if is_playable(ent):
                 items.append(self.make_item(ent))
                 rows.append(r)
+                ents.append(ent)
         if not items:
             self.set_status("Bu klasörde oynatılabilir öğe yok.")
             return
-        self.set_queue(items, rows)
-        self.start_item(0)
+        self._play_queue(items, rows, ents, 0)
 
     # ---- yerel dosya / klasör ----
     def _media_filters(self) -> Gio.ListStore:
@@ -2052,11 +2086,15 @@ class MainWindow(Gtk.ApplicationWindow):
         if not paths:
             return
         items = [QueueItem(os.path.basename(p), path=p) for p in paths]
-        self.set_queue(items, [None] * len(items))
-        self.start_item(0)
+        ents = [Entry(id=p, title=os.path.basename(p), is_container=False, uri="file://" + p,
+                      mime=guess_mime(p)) for p in paths]
+        self._play_queue(items, [None] * len(items), ents, 0)
 
     # ---- kuyruk ----
     def set_queue(self, items: List[QueueItem], rows: List[Optional[Row]]) -> None:
+        if self.queue_idx >= 0 and self._was_playing:
+            self._save_position(True)  # eski kuyruktaki videonun konumu
+        self._queue_entries = None  # görüntüleyici için _play_queue yeniden verir
         self.queue = items
         self.queue_rows = rows
         self.queue_idx = -1
@@ -2089,6 +2127,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if target is None:
             self.set_status("Önce üstteki \"Şurada oynat\" düğmesinden bir cihaz seç.")
             return
+        if self.queue_idx >= 0 and self._was_playing:
+            self._save_position(True)  # önceki videonun konumu
+        self._use_player(self._queue_entries is not None)
         item = self.queue[idx]
         if start <= 0:  # sarmada eski bilgi kalsın; art arda sarmalar da yeniden başlatmaya gitsin
             self._tc = None
@@ -2112,9 +2153,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self._was_playing = False
         self._user_stopped = False
         self._last_pos = self._last_dur = 0.0
+        self._resume_to = None
+        if start <= 0:
+            saved = self.config.get("konumlar", {}).get(self._item_key(idx) or "")
+            if saved and saved[0] >= 20:
+                self._resume_to = float(saved[0])
         self._play_t0 = time.monotonic()
         self.reset_playback_ui()
         self.update_nav_buttons()
+        self._viewer_sync()
         row = self.queue_rows[idx] if idx < len(self.queue_rows) else None
         if self._playing_row is not None:
             self._playing_row.set_playing(False)
@@ -2186,6 +2233,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if self._last_dur > 0 and self._last_pos < self._last_dur - END_TOLERANCE:
             return  # ortada durmuş (uzaktan kumanda vb.), bitmiş sayma
+        self._save_position(True)  # sona gelindi: kayıtlı konum silinir
         auto = self.autonext.get_active()
         if auto and self.queue_idx + 1 < len(self.queue):
             self.start_item(self.queue_idx + 1)
@@ -2227,6 +2275,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.play_btn.set_icon_name("media-playback-pause-symbolic" if playing
                                     else "media-playback-start-symbolic")
         self.play_btn.set_tooltip_text("Duraklat" if playing else "Oynat")
+        self.fs_play_btn.set_icon_name("media-playback-pause-symbolic" if playing
+                                       else "media-playback-start-symbolic")
         if self._pending or state not in ("PLAYING", "TRANSITIONING", "PAUSED_PLAYBACK"):
             icon, text = "media-playback-start-symbolic", "Yayınla"
         elif playing:
@@ -2373,6 +2423,15 @@ class MainWindow(Gtk.ApplicationWindow):
                     sc.set_sensitive(st.duration > 0)
                 for lb in self.dur_labels:
                     lb.set_text(fmt_time(st.duration) if st.duration > 0 else "--:--")
+            if self._resume_to is not None and st.state == "PLAYING" and st.duration > 0:
+                pos, self._resume_to = self._resume_to, None  # kaldığın yerden devam
+                if pos < st.duration - 30:
+                    self._do_seek(pos)
+                    self._last_pos = pos
+                    self._pos_saved = time.monotonic()
+                    self.show_toast(f"Kaldığın yerden devam ediliyor ({fmt_time(pos)})")
+            elif self._resume_to is None:
+                self._save_position()
             user_busy = self._seek_src or time.monotonic() - self._seek_touch < 2.0
             if not user_busy:
                 self._pos = st.position
@@ -2425,29 +2484,70 @@ class MainWindow(Gtk.ApplicationWindow):
         back.connect("clicked", lambda *_: self.close_photo())
         self.photo_title = Gtk.Label(xalign=0, ellipsize=3, hexpand=True, css_classes=["buyuk-baslik"])
         self.photo_count = Gtk.Label(css_classes=["soluk"])
+        self.ext_btn = Gtk.Button(label="Harici oynatıcıda aç",
+                                  tooltip_text="Bunu bilgisayardaki başka bir programda (varsayılan "
+                                               "oynatıcı) aç")
+        self.ext_btn.connect("clicked", lambda *_: self.open_external())
         self.photo_cast = Gtk.ToggleButton(icon_name="video-display-symbolic", label="Cihazda göster",
                                            tooltip_text="Açık fotoğraf, üstte seçili cihazda da görünsün")
         self.photo_cast.connect("toggled", self.on_photo_cast)
         top = self.photo_top = Gtk.Box(spacing=8, margin_top=10, margin_bottom=6, margin_start=12, margin_end=16)
-        for w in (back, self.photo_title, self.photo_count, self.photo_cast):
+        for w in (back, self.photo_title, self.photo_count, self.ext_btn, self.photo_cast):
             top.append(w)
 
+        # ana alan: fotoğraf, "şu an oynuyor" kapağı ya da (varsa) program içi video
+        self.media_stack = Gtk.Stack(hexpand=True, vexpand=True)
         self.photo_pic = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True,
                                      hexpand=True, vexpand=True)
+        self.media_stack.add_named(self.photo_pic, "foto")
+        self.cover_pic = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True,
+                                     hexpand=True, vexpand=True)
+        self.cover_icon = Gtk.Image(icon_name="video-x-generic-symbolic", pixel_size=96,
+                                    css_classes=["soluk-ikon"], halign=Gtk.Align.CENTER,
+                                    valign=Gtk.Align.CENTER)
+        self.calan_title = Gtk.Label(xalign=0, ellipsize=3, css_classes=["calan-baslik"])
+        self.calan_dev = Gtk.Label(xalign=0, ellipsize=3, css_classes=["kucuk"])
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.START,
+                       valign=Gtk.Align.START, css_classes=["calan-bilgi"])
+        info.append(self.calan_title)
+        info.append(self.calan_dev)
+        calan = Gtk.Overlay(child=self.cover_pic)
+        calan.add_overlay(self.cover_icon)
+        calan.add_overlay(info)
+        self.media_stack.add_named(calan, "calan")
+
         self.photo_spin = Gtk.Spinner(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
                                       width_request=32, height_request=32)
-        area = Gtk.Overlay(child=self.photo_pic, css_classes=["foto-alani"], hexpand=True, vexpand=True)
+        area = Gtk.Overlay(child=self.media_stack, css_classes=["foto-alani"], hexpand=True, vexpand=True)
         area.add_overlay(self.photo_spin)
         for icon, side, delta, tip in (("go-previous-symbolic", Gtk.Align.START, -1, "Önceki (←)"),
                                        ("go-next-symbolic", Gtk.Align.END, 1, "Sonraki (→)")):
             btn = Gtk.Button(icon_name=icon, halign=side, valign=Gtk.Align.CENTER, tooltip_text=tip,
                              css_classes=["yuvarlak", "foto-ok"], focus_on_click=False)
-            btn.connect("clicked", lambda _b, d=delta: self.photo_step(d))
+            btn.connect("clicked", lambda _b, d=delta: self._viewer_step(d))
             area.add_overlay(btn)
 
-        # tam ekranda şerit, fare altta gezinince beliren bir panel olur
+        # tam ekranda alt panel (video kontrolleri + şerit) fare altta gezinince beliren bir panel olur
+        def fbtn(icon: str, tip: str, fn) -> Gtk.Button:
+            b = Gtk.Button(icon_name=icon, tooltip_text=tip, css_classes=["flat", "yuvarlak"],
+                           focus_on_click=False, valign=Gtk.Align.CENTER)
+            b.connect("clicked", lambda _b: fn())
+            return b
+
+        self.fs_play_btn = fbtn("media-playback-start-symbolic", "Oynat / Duraklat", self.toggle_play)
+        self.fs_controls = Gtk.Box(spacing=6, css_classes=["video-cubugu"], visible=False)
+        self.fs_controls.append(fbtn("media-skip-backward-symbolic", "Önceki", self.prev_item))
+        self.fs_controls.append(self.fs_play_btn)
+        self.fs_controls.append(fbtn("media-skip-forward-symbolic", "Sonraki", self.next_item))
+        seek = self._seek_row()
+        seek.set_hexpand(True)
+        self.fs_controls.append(seek)
+        self.fs_controls.append(fbtn("view-restore-symbolic", "Tam ekrandan çık (Esc)", self.toggle_photo_fs))
+        self.fs_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.fs_panel.append(self.fs_controls)
         self.strip_rev = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP,
-                                      valign=Gtk.Align.END, halign=Gtk.Align.FILL, reveal_child=False)
+                                      valign=Gtk.Align.END, halign=Gtk.Align.FILL, reveal_child=False,
+                                      child=self.fs_panel)
         area.add_overlay(self.strip_rev)
         motion = Gtk.EventControllerMotion()
         motion.connect("motion", self._on_photo_motion)
@@ -2473,23 +2573,70 @@ class MainWindow(Gtk.ApplicationWindow):
         self.photos = [x for x in self.entries if is_image(x)]
         if ent not in self.photos:
             return
+        self.viewer_mode = "foto"
+        self._set_viewer_mode()
+        self._fill_strip(self.photos)
+        self.view_stack.set_visible_child_name("foto")
+        self.show_photo(self.photos.index(ent))
+
+    def _set_viewer_mode(self) -> None:
+        video = self.viewer_mode == "video"
+        self.photo_cast.set_visible(not video)
+        if video:
+            self.photo_spin.stop()
+        self.ext_btn.set_label("Harici oynatıcıda aç" if video else "Harici uygulamada aç")
+        if self._photo_fs:
+            self.fs_controls.set_visible(video)
+        if not video:
+            self.media_stack.set_visible_child_name("foto")
+
+    def _fill_strip(self, entries: List[Entry]) -> None:
+        """Alt şeridi verilen öğelerin küçük resimleriyle doldurur."""
+        self.strip_entries = entries
         while (child := self.strip_box.get_first_child()) is not None:
             self.strip_box.remove(child)
         tiles = {id(r.data): r for r in self.entry_rows if isinstance(r, Tile)}
         self._strip_gen += 1
         gen = self._strip_gen
-        for i, e in enumerate(self.photos):
+        for i, e in enumerate(entries):
             btn = PhotoThumb(e)
-            btn.connect("clicked", lambda _b, i=i: self.show_photo(i))
+            btn.connect("clicked", lambda _b, i=i: self._strip_click(i))
             self.strip_box.append(btn)
             tile = tiles.get(id(e))
             tex = tile.pic.get_paintable() if tile is not None else None
             if tex is not None:
                 btn.set_thumb(tex)  # ızgaradan hazır
             else:
-                self._thumbs.submit(self._strip_job, gen, i, e, self.view_local)
-        self.view_stack.set_visible_child_name("foto")
-        self.show_photo(self.photos.index(ent))
+                self._thumbs.submit(self._strip_job, gen, i, e, (e.uri or "").startswith("file://"))
+
+    def _strip_click(self, i: int) -> None:
+        if self.viewer_mode == "video":
+            self.start_item(i)
+        else:
+            self.show_photo(i)
+
+    def _nth_strip(self, idx: int) -> Optional[PhotoThumb]:
+        btn = self.strip_box.get_first_child()
+        for _ in range(idx):
+            btn = btn.get_next_sibling() if btn is not None else None
+        return btn
+
+    def _mark_strip(self, idx: int) -> None:
+        child, i = self.strip_box.get_first_child(), 0
+        while child is not None:
+            child.set_current(i == idx)
+            if i == idx:
+                GLib.idle_add(self._scroll_strip_to, child)
+            child, i = child.get_next_sibling(), i + 1
+
+    def _cur_idx(self) -> int:
+        return self.queue_idx if self.viewer_mode == "video" else self.photo_idx
+
+    def _viewer_step(self, delta: int) -> None:
+        if self.viewer_mode == "video":
+            (self.next_item if delta > 0 else self.prev_item)()
+        else:
+            self.photo_step(delta)
 
     def _strip_job(self, gen: int, idx: int, e: Entry, local: bool) -> None:
         if gen != self._strip_gen:
@@ -2507,11 +2654,11 @@ class MainWindow(Gtk.ApplicationWindow):
     def _set_strip_thumb(self, gen: int, idx: int, pix) -> None:
         if gen != self._strip_gen:
             return
-        btn = self.strip_box.get_first_child()
-        for _ in range(idx):
-            btn = btn.get_next_sibling() if btn is not None else None
+        btn = self._nth_strip(idx)
         if btn is not None:
             btn.set_thumb(Gdk.Texture.new_for_pixbuf(pix))
+            if self.viewer_mode == "video" and idx == self.queue_idx:
+                self._cover_from_strip()
 
     def show_photo(self, idx: int) -> None:
         if not 0 <= idx < len(self.photos):
@@ -2520,13 +2667,7 @@ class MainWindow(Gtk.ApplicationWindow):
         e = self.photos[idx]
         self.photo_title.set_text(e.title)
         self.photo_count.set_text(f"{idx + 1} / {len(self.photos)}")
-        child = self.strip_box.get_first_child()
-        i = 0
-        while child is not None:
-            child.set_current(i == idx)
-            if i == idx:
-                GLib.idle_add(self._scroll_strip_to, child)
-            child, i = child.get_next_sibling(), i + 1
+        self._mark_strip(idx)
         self._photo_gen += 1
         self.photo_spin.start()
         self._thumbs.submit(self._photo_job, self._photo_gen, e, self.view_local)
@@ -2597,31 +2738,43 @@ class MainWindow(Gtk.ApplicationWindow):
             self.photo_view.remove(self.strip_scroll)
             self.strip_scroll.add_css_class("yuzen")
             self.strip_scroll.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)  # çubuk gizli
-            self.strip_rev.set_child(self.strip_scroll)
+            self.fs_panel.append(self.strip_scroll)
+            self.fs_controls.set_visible(self.viewer_mode == "video")
         else:
             self.strip_rev.set_reveal_child(False)
-            self.strip_rev.set_child(None)
+            self.fs_panel.remove(self.strip_scroll)
             self.strip_scroll.remove_css_class("yuzen")
             self.strip_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
             self.photo_view.append(self.strip_scroll)
+            if self._cursor_src:
+                GLib.source_remove(self._cursor_src)
+                self._cursor_src = 0
+            self.photo_area.set_cursor(None)
 
     def _on_photo_motion(self, _ctl, x: float, y: float) -> None:
+        self.photo_area.set_cursor(None)
+        if self._cursor_src:
+            GLib.source_remove(self._cursor_src)
+            self._cursor_src = 0
         if not self._photo_fs:
             return
+        self._cursor_src = GLib.timeout_add(2500, self._hide_cursor)  # fare durunca imleç gizlenir
         h = self.photo_area.get_height()
         shown = self.strip_rev.get_reveal_child()
-        self._strip_reveal(y > h - (130 if shown else 120))  # açıkken biraz tolerans
-        if shown and y > h - 130:  # şerit açıkken fare sağa/sola gidince şerit de akar
+        panel = max(self.fs_panel.get_height(), 100) if shown else 0
+        self._strip_reveal(y > h - (panel + 20 if shown else 120))  # açıkken biraz tolerans
+        strip_h = self.strip_scroll.get_height()
+        if shown and y > h - strip_h - 8:  # şerit açıkken fare sağa/sola gidince şerit de akar
             adj = self.strip_scroll.get_hadjustment()
             w = self.photo_area.get_width()
             span = adj.get_upper() - adj.get_page_size()
             if self._strip_v0 is None or w <= 160 or span <= 0:
-                return  # şerit henüz açık fotoğrafa kaydırılmadı
+                return  # şerit henüz açık öğeye kaydırılmadı
             if self._strip_x0 is None:
                 self._strip_x0 = x  # fare buradan sonra ne kadar giderse şerit o kadar akar
             else:
                 # başlangıç noktasından sola doğru şeridin başına, sağa doğru sonuna uzanır:
-                # ekranın en sol/sağ kenarı şeridin ilk/son fotoğrafıdır
+                # ekranın en sol/sağ kenarı şeridin ilk/son öğesidir
                 x0, v0, edge = self._strip_x0, self._strip_v0, 24.0
                 if x < x0:
                     t = max(0.0, (x - edge) / max(1.0, x0 - edge))
@@ -2631,15 +2784,20 @@ class MainWindow(Gtk.ApplicationWindow):
                     val = span - (span - v0) * t
                 adj.set_value(max(0.0, min(span, val)))
 
+    def _hide_cursor(self) -> bool:
+        self._cursor_src = 0
+        if self._photo_fs and not self.strip_rev.get_reveal_child():
+            self.photo_area.set_cursor(Gdk.Cursor.new_from_name("none"))
+        return False
+
     def _strip_reveal(self, on: bool) -> None:
         if not self._photo_fs or on == self.strip_rev.get_reveal_child():
             return
         self.strip_rev.set_reveal_child(on)
         self._strip_v0 = self._strip_x0 = None
-        if on and 0 <= self.photo_idx < len(self.photos):
-            btn = self.strip_box.get_first_child()
-            for _ in range(self.photo_idx):
-                btn = btn.get_next_sibling() if btn is not None else None
+        idx = self._cur_idx()
+        if on and 0 <= idx < len(self.strip_entries):
+            btn = self._nth_strip(idx)
             if btn is not None:
                 GLib.timeout_add(280, self._anchor_strip, btn)  # açılma animasyonu bitince
 
@@ -2651,10 +2809,10 @@ class MainWindow(Gtk.ApplicationWindow):
         return False
 
     def close_photo(self) -> None:
+        """Görüntüleyiciden klasöre döner (video/müzik çalmaya devam eder)."""
         if self._photo_fs and self.is_fullscreen():
             self.toggle_photo_fs()
         self._photo_gen += 1
-        self._strip_gen += 1
         self.photo_spin.stop()
         self.view_stack.set_visible_child_name("liste")
 
@@ -2673,6 +2831,176 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.set_queue([self.make_item(e)], [None])
         self.start_item(0)
+
+    # ---- video / müzik görüntüleyici (Ağda Gez içinde) ----
+    def _ensure_vplayer(self) -> None:
+        """Program içi oynatıcıyı bir kez kurar (python-mpv/libmpv yoksa ayrı pencereli mpv kalır)."""
+        if self._vplayer_tried:
+            return
+        self._vplayer_tried = True
+        if not (gomulu.available() and self.config.get("gez_gomulu", True)):
+            return
+        try:
+            vp = gomulu.EmbeddedPlayer()
+        except Exception as exc:  # noqa: BLE001
+            print(f"Gömülü oynatıcı açılamadı: {exc!r}")
+            return
+        click = Gtk.GestureClick()
+        click.connect("pressed", self._on_video_click)
+        vp.widget.add_controller(click)
+        self.media_stack.add_named(vp.widget, "video")
+        self._ext_local = self.cp.player
+        self.vplayer = vp
+
+    def _use_player(self, embedded: bool) -> None:
+        """"Bu bilgisayar" hedefi için program içi ya da ayrı pencereli oynatıcıyı seçer."""
+        if self.vplayer is None:
+            return
+        new = self.vplayer if embedded else self._ext_local
+        if self.cp.player is not new:
+            old, self.cp.player = self.cp.player, new
+            try:
+                old.close()  # çalan varsa durur; yenisi başlayacak
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_video_click(self, _gesture, n_press: int, _x, _y) -> None:
+        if self._click_src:
+            GLib.source_remove(self._click_src)
+            self._click_src = 0
+        if n_press >= 2:
+            self.toggle_photo_fs()
+        else:  # çift tıklamayı bekle; tek tıklama oynat/duraklat
+            self._click_src = GLib.timeout_add(260, self._video_click_pause)
+
+    def _video_click_pause(self) -> bool:
+        self._click_src = 0
+        self.toggle_play()
+        return False
+
+    def _play_queue(self, items: List[QueueItem], rows: List[Optional[Row]],
+                    entries: List[Entry], start: int) -> None:
+        """Kuyruğu kurar, video görüntüleyicisini açar ve oynatmayı başlatır."""
+        self.tabs.set_visible_child_name("gez")
+        self.set_queue(items, rows)
+        self._queue_entries = entries
+        self._ensure_vplayer()
+        self.open_video_view(entries)
+        self.start_item(start)
+
+    def open_video_view(self, entries: List[Entry]) -> None:
+        self.viewer_mode = "video"
+        self._set_viewer_mode()
+        self._fill_strip(entries)
+        self.view_stack.set_visible_child_name("foto")
+        self._viewer_sync()
+
+    def reopen_viewer(self) -> None:
+        """Alt paneldeki "çalan"a tıklayınca video görüntüleyicisi yeniden açılır."""
+        if (self._queue_entries is not None and self.queue_idx >= 0
+                and self.view_stack.get_visible_child_name() != "foto"):
+            self.open_video_view(self._queue_entries)
+
+    def _viewer_sync(self) -> None:
+        """Görüntüleyiciyi çalan öğeyle eşler: başlık, şerit, program içi video ya da "çalan" kapağı."""
+        ents = self._queue_entries
+        idx = self.queue_idx
+        if self.viewer_mode != "video" or ents is None or not 0 <= idx < len(ents):
+            return
+        item, e = self.queue[idx], ents[idx]
+        target = self.selected_renderer()
+        self.photo_title.set_text(item.title)
+        self.photo_count.set_text(f"{idx + 1} / {len(ents)}")
+        self._mark_strip(idx)
+        audio = (e.mime or "").startswith("audio/") or entry_icon(e) == "audio-x-generic-symbolic"
+        embedded = (target is not None and target.location == LOCAL_PLAYER_ID
+                    and self.vplayer is not None and self.cp.player is self.vplayer and not audio)
+        if embedded:
+            self.media_stack.set_visible_child_name("video")
+            return
+        self.calan_title.set_text(item.title)
+        self.calan_dev.set_text(f"{target.name} cihazında oynuyor" if target is not None else "")
+        self.cover_icon.set_from_icon_name("audio-x-generic-symbolic" if audio else "video-x-generic-symbolic")
+        self._cover_from_strip()
+        self.media_stack.set_visible_child_name("calan")
+
+    def _cover_from_strip(self) -> None:
+        btn = self._nth_strip(self.queue_idx)
+        tex = btn.pic.get_paintable() if btn is not None else None
+        self.cover_pic.set_paintable(tex)
+        self.cover_icon.set_visible(tex is None)
+
+    def open_external(self) -> None:
+        """Açık fotoğrafı/videoyu bilgisayardaki varsayılan programda açar."""
+        path = uri = None
+        mime = ""
+        if self.viewer_mode == "video":
+            if not 0 <= self.queue_idx < len(self.queue):
+                return
+            item = self.queue[self.queue_idx]
+            path, uri = item.path, item.uri
+            mime = item.mime or (guess_mime(item.path) if item.path else "")
+        else:
+            if not 0 <= self.photo_idx < len(self.photos):
+                return
+            e = self.photos[self.photo_idx]
+            path = e.id if (e.uri or "").startswith("file://") else None
+            uri, mime = e.uri, e.mime or ""
+        target_uri = Gio.File.new_for_path(path).get_uri() if path else uri
+        if not target_uri:
+            self.show_toast("Bunun açılabilir bir adresi yok.", error=True)
+            return
+        if self.viewer_mode == "video":
+            target = self.selected_renderer()
+            if target is not None and target.location == LOCAL_PLAYER_ID:
+                self.send_control("stop")  # program içinde çalan varsa çift ses olmasın
+        ok = False
+        try:
+            app = Gio.AppInfo.get_default_for_type(mime, False) if mime else None
+            ok = app.launch_uris([target_uri], None) if app is not None \
+                else Gio.AppInfo.launch_default_for_uri(target_uri, None)
+        except GLib.Error:
+            ok = False
+        if not ok and shutil.which("mpv"):  # uygulama adresi alamadıysa mpv ile dene
+            try:
+                subprocess.Popen(["mpv", target_uri], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+                ok = True
+            except OSError:
+                ok = False
+        if not ok:
+            self.show_toast("Harici program açılamadı. Dosya türü için varsayılan bir oynatıcı seçili mi?",
+                            error=True)
+
+    # ---- kaldığın yerden devam ----
+    def _item_key(self, idx: int) -> Optional[str]:
+        if not 0 <= idx < len(self.queue):
+            return None
+        return self.queue[idx].path or self.queue[idx].uri
+
+    def _save_position(self, force: bool = False) -> None:
+        """Uzun videonun konumunu saklar; sona yakınsa kaydı siler."""
+        key = self._item_key(self.queue_idx)
+        pos, dur = self._last_pos, self._last_dur
+        if not key or dur < RESUME_MIN or not (self._was_playing or force):
+            return
+        now = time.monotonic()
+        if not force and now - self._pos_saved < 15:
+            return
+        saved = self.config.setdefault("konumlar", {})
+        if pos > dur - 30:
+            changed = saved.pop(key, None) is not None
+        elif pos >= 20:
+            saved[key] = [round(pos), int(time.time())]
+            changed = True
+            if len(saved) > 300:
+                for k in sorted(saved, key=lambda k: saved[k][1])[:len(saved) - 300]:
+                    del saved[k]
+        else:
+            changed = False
+        if changed:
+            self._pos_saved = now
+            save_config(self.config)
 
     # ---- ızgara ve küçük resimler ----
     def _update_view_btn(self) -> None:

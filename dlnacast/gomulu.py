@@ -74,6 +74,7 @@ class EmbeddedPlayer:
         self.on_change: Optional[Callable[[], None]] = None  # durum değişince (ana thread'de)
         self.title = ""
         self.is_audio = False
+        self._dead = False
         for prop in ("pause", "idle-active", "vid"):
             self.mpv.observe_property(prop, lambda *_: GLib.idle_add(self._changed))
 
@@ -124,9 +125,13 @@ class EmbeddedPlayer:
 
     @property
     def has_media(self) -> bool:
+        if self._dead:  # kapanırken zamanlayıcılar hâlâ soruyor olabilir
+            return False
         return self.mpv.idle_active is False
 
     def _get(self, name: str):
+        if self._dead:
+            return None
         try:
             return getattr(self.mpv, name)
         except Exception:  # noqa: BLE001  (henüz yüklenmemiş özellik)
@@ -183,7 +188,7 @@ class EmbeddedPlayer:
                 int(round(vol)) if isinstance(vol, (int, float)) else None)
 
     async def seek(self, seconds: float) -> None:
-        self.mpv.seek(float(seconds), "absolute")
+        self.mpv.seek(float(seconds), "absolute", "exact")  # tam konum (anahtar kareye yuvarlanmaz)
 
     async def set_volume(self, level: int) -> None:
         self.mpv.volume = int(level)
@@ -202,6 +207,8 @@ class EmbeddedPlayer:
 
     def close(self) -> None:
         """Oynatmayı durdurur (alıcı kapatılınca). mpv örneği program kapanana kadar kalır."""
+        if self._dead:  # terminate'ten sonra mpv'ye komut göndermek programı çökertir
+            return
         try:
             self.mpv.command("stop")
         except Exception:  # noqa: BLE001
@@ -209,6 +216,9 @@ class EmbeddedPlayer:
         self.title = ""
 
     def terminate(self) -> None:
+        if self._dead:
+            return
+        self._dead = True
         if self._ctx is not None:
             self._ctx.free()
             self._ctx = None

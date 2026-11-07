@@ -1,5 +1,11 @@
 # Değişiklikler
 
+## 0.12.0
+- Ağda Gez: bir videoya ya da müziğe tıklayınca "Bu bilgisayar"da program içinde büyük açılır (ayrı mpv penceresi yok). Altta klasördeki diğer videoların küçük resim şeridi var; tıklayınca o videoya geçer. TV'ye oynatırken de aynı sayfada "şu an oynuyor" kapağı ve şerit görünür.
+- Tam ekran (düğme, F11/F, videoya çift tıklama): fareyi alt kenara götürünce oynat/duraklat, ilerleme çubuğu ve şerit açılır; fare durunca imleç gizlenir. ←/→ 10 sn atlar, Page Up/Down önceki/sonraki.
+- Kaldığın yerden devam: 3 dakikadan uzun videolar, kapatsan bile kaldığın yerden açılır.
+- "Harici oynatıcıda aç": açık video (ya da fotoğraf) bilgisayardaki varsayılan programda açılır. Alt paneldeki çalan başlığına tıklayınca oynatıcı görünümü tekrar açılır.
+
 ## 0.11.0
 - Ağda Gez: bir resme tıklayınca fotoğraf programın içinde büyük açılır; klasördeki diğer resimler altta küçük resim şeridi olarak sıralanır. ← → tuşları, yan oklar ya da şeritten gezebilirsin; Esc klasöre döner.
 - Tam ekran: ses çubuğunun yanındaki düğme, F11 ya da F tuşu. Tam ekranda fareyi alt kenara götürünce şerit açılır, fareyi sağa sola gezdirince kayar.
