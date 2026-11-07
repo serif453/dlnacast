@@ -1,5 +1,11 @@
 # Değişiklikler
 
+## 0.9.0
+- Alıcı: telefondan gönderilen video artık ayrı pencerede değil, programın "Alıcı" sekmesinde oynar. Video gelince sekme kendiliğinden açılır.
+- Tam ekran: videonun altındaki ⛶ düğmesi, F tuşu ya da videoya çift tıklama. Çıkmak için Esc.
+- Oynatıcının altında oynat/duraklat, 10 sn ileri/geri, ilerleme ve ses çubuğu var; Boşluk ve ← → tuşları da çalışır.
+- Eski usul ayrı pencere istersen "Program içinde oynat" anahtarını kapat.
+
 ## 0.8.1
 - Düzeltme: bazı telefon ve kutuların medya sunucusu (örn. Honor "VihomeMediaServer") "Ağda Gez" listesinde hiç çıkmıyordu; artık çıkıyor.
 

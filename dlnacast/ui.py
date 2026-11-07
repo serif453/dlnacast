@@ -19,6 +19,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
 
 from . import __version__  # noqa: E402
 from . import guncelleme  # noqa: E402
+from . import gomulu  # noqa: E402
 from . import kucukresim  # noqa: E402
 from .bridge import AsyncBridge, to_ui  # noqa: E402
 from .controlpoint import LOCAL_ID, LOCAL_PLAYER_ID, ControlPoint, DeviceInfo, Entry, PlayStatus  # noqa: E402
@@ -80,6 +81,12 @@ CSS = b"""
 .rozet-dlna { background-color: alpha(#3b6fd8, 0.16); color: #3b6fd8; }
 .rozet-pc { background-color: alpha(currentColor, 0.1); }
 .acik-yazi { color: #2e9d4a; }
+.video-alani { background-color: black; border-radius: 10px; }
+.video-alani.tam-ekran { border-radius: 0; }
+.video-bos { color: alpha(white, 0.7); }
+.video-cubugu { background-color: rgba(0, 0, 0, 0.62); color: white; padding: 6px 10px; }
+.video-cubugu button { color: white; }
+.video-cubugu label { color: white; }
 .ses-dugmesi { font-size: 1.2em; font-weight: bold; }
 .adim { font-weight: bold; min-width: 26px; min-height: 26px; border-radius: 999px;
         background-color: alpha(currentColor, 0.1); }
@@ -531,8 +538,17 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.mserver = MediaServer(f"DLNA Cast ({socket.gethostname()})", self.config["uuid"])
         self.cp.local_media = self.mserver
+        self.config.setdefault("alici_gomulu", True)
+        self.rplayer: Optional["gomulu.EmbeddedPlayer"] = None  # alıcının program içi oynatıcısı
+        if gomulu.available():
+            try:
+                self.rplayer = gomulu.EmbeddedPlayer()
+            except Exception as exc:  # noqa: BLE001  (libmpv açılamazsa eski mpv penceresi)
+                print(f"Gömülü oynatıcı açılamadı: {exc!r}")
+        self._ext_player = None  # ayrı pencereli mpv (gerekince oluşturulur)
         self.renderer = MediaRenderer(f"DLNA Cast Alıcı ({socket.gethostname()})",
-                                      self.config["renderer_uuid"], self.bridge.loop)
+                                      self.config["renderer_uuid"], self.bridge.loop,
+                                      player=self._pick_renderer_player())
         self.renderer.on_message = lambda text: to_ui(self.on_renderer_message, text)
 
         self._build_header()
@@ -563,10 +579,12 @@ class MainWindow(Gtk.ApplicationWindow):
         # Boşluk vb. her yerde çalışsın (CAPTURE); ok tuşları ise önce odaktaki
         # ses/ilerleme çubuğuna gitsin, onlar kullanmazsa sarma yapsın (BUBBLE).
         for phase, pairs in (
-                (Gtk.PropagationPhase.CAPTURE, (("space", self.toggle_play), ("BackSpace", self.go_back),
-                                                ("<Control>o", self.open_file), ("F5", self.refresh))),
-                (Gtk.PropagationPhase.BUBBLE, (("Left", lambda: self.skip(-SKIP_SECONDS)),
-                                               ("Right", lambda: self.skip(SKIP_SECONDS))))):
+                (Gtk.PropagationPhase.CAPTURE, (("space", self.on_space), ("BackSpace", self.go_back),
+                                                ("<Control>o", self.open_file), ("F5", self.refresh),
+                                                ("F11", self.on_fullscreen_key), ("f", self.on_fullscreen_key),
+                                                ("Escape", self.on_escape))),
+                (Gtk.PropagationPhase.BUBBLE, (("Left", lambda: self.on_arrow(-SKIP_SECONDS)),
+                                               ("Right", lambda: self.on_arrow(SKIP_SECONDS))))):
             keys = Gtk.ShortcutController(propagation_phase=phase)
             for trigger, fn in pairs:
                 keys.add_shortcut(Gtk.Shortcut(trigger=Gtk.ShortcutTrigger.parse_string(trigger),
@@ -590,6 +608,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.tabs.get_child_by_name(tab) is not None:
             self.tabs.set_visible_child_name(tab)
         self.tabs.connect("notify::visible-child-name", self.on_tab_changed)
+        if self.rplayer is not None:  # görüntü alanı baştan hazır olsun (bkz. EmbeddedPlayer.prepare)
+            self.connect("map", lambda *_: GLib.idle_add(self.rplayer.prepare))
         self.refresh()
         GLib.timeout_add_seconds(POLL_SECONDS, self.poll)
         GLib.timeout_add_seconds(2, self._update_receiver_info)
@@ -803,6 +823,14 @@ class MainWindow(Gtk.ApplicationWindow):
                                "Açıkken telefon ve bilgisayarlar bu bilgisayarı TV gibi görür; "
                                "gönderdikleri video ve müzik burada oynar.",
                                self.renderer_switch, icon="video-display-symbolic"))
+        self.embed_switch = Gtk.Switch(active=bool(self.rplayer) and self.config["alici_gomulu"],
+                                       sensitive=self.rplayer is not None)
+        tbox.append(switch_row("Program içinde oynat",
+                               "Gelen video aşağıdaki oynatıcıda açılır. Kapalıysa ayrı bir mpv "
+                               "penceresinde açılır." if self.rplayer else
+                               "Kullanılamıyor: python-mpv kurulu değil, video ayrı pencerede açılır.",
+                               self.embed_switch, icon="view-reveal-symbolic"))
+        self.embed_switch.connect("notify::active", self.on_embed_switch)
         tbox.append(Gtk.Separator())
         grid = Gtk.Grid(column_spacing=16, row_spacing=6)
         self.rcv_state = Gtk.Label(xalign=0, css_classes=["calan-baslik"])
@@ -815,6 +843,10 @@ class MainWindow(Gtk.ApplicationWindow):
             grid.attach(w, 1, i, 1, 1)
         tbox.append(grid)
         page.append(top)
+        self.rcv_page = page
+        self.rcv_top = top
+        self.rcv_video_card = self._build_video_card()
+        page.append(self.rcv_video_card)
 
         how, hbox = card("Nasıl kullanılır?")
         steps = Gtk.Grid(column_spacing=10, row_spacing=8)
@@ -822,7 +854,8 @@ class MainWindow(Gtk.ApplicationWindow):
                                   "Telefonda bir DLNA uygulaması aç (BubbleUPnP, VLC, Kodi, "
                                   "Windows \"Cihaza yayınla\" vb.).",
                                   f"Cihaz listesinde \"{self.renderer.name}\" adını seç ve bir video gönder.",
-                                  "Video bu bilgisayarda ayrı pencerede açılır; müzik penceresiz çalar.")):
+                                  "Video aşağıdaki oynatıcıda açılır (⛶ ya da F tuşu: tam ekran); "
+                                  "müzik penceresiz çalar.")):
             steps.attach(Gtk.Label(label=str(i + 1), css_classes=["adim"], valign=Gtk.Align.START), 0, i, 1, 1)
             steps.attach(Gtk.Label(label=text, xalign=0, wrap=True, hexpand=True), 1, i, 1, 1)
         hbox.append(steps)
@@ -830,6 +863,7 @@ class MainWindow(Gtk.ApplicationWindow):
                                     "duvarının UDP 1900 portuna izin verdiğinden emin ol.",
                               xalign=0, wrap=True, css_classes=["soluk", "kucuk"]))
         page.append(how)
+        self.rcv_how = how
 
         log, lbox = card("Son olaylar")
         log.set_vexpand(True)
@@ -838,7 +872,270 @@ class MainWindow(Gtk.ApplicationWindow):
         lbox.append(Gtk.ScrolledWindow(child=self.rcv_log, vexpand=True, min_content_height=80,
                                        hscrollbar_policy=Gtk.PolicyType.NEVER))
         page.append(log)
+        self.rcv_log_card = log
         return page_scroll(page)
+
+    # ---------------- alıcının program içi oynatıcısı ----------------
+    def _pick_renderer_player(self):
+        """Ayara göre alıcının kullanacağı oynatıcı: program içi ya da ayrı mpv penceresi."""
+        if self.rplayer is not None and self.config.get("alici_gomulu", True):
+            return self.rplayer
+        if self._ext_player is None:
+            from .localplayer import LocalPlayer
+            self._ext_player = LocalPlayer(tag="-alici", title="DLNA Cast (alıcı)")
+        return self._ext_player
+
+    def on_embed_switch(self, switch: Gtk.Switch, _pspec) -> None:
+        self.config["alici_gomulu"] = switch.get_active()
+        save_config(self.config)
+        old = self.renderer.player
+        new = self._pick_renderer_player()
+        if new is not old:
+            old.close()  # çalan varsa durur; telefondan yeniden gönderince yeni yerde açılır
+            self.renderer.player = new
+            self.renderer._loaded_uri = ""
+        self.rcv_video_card.set_visible(self.renderer.player is self.rplayer)
+        self._update_video_bar()
+
+    def _build_video_card(self) -> Gtk.Widget:
+        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["kart"], spacing=8)
+        self.video_title = Gtk.Label(label="Oynatıcı", xalign=0, ellipsize=3, css_classes=["kart-baslik"])
+        frame.append(self.video_title)
+        self.video_area = Gtk.Overlay(css_classes=["video-alani"], overflow=Gtk.Overflow.HIDDEN,
+                                      vexpand=True)
+        self.video_area.set_size_request(-1, 380)
+        self.video_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        empty = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.CENTER,
+                        halign=Gtk.Align.CENTER, css_classes=["video-bos"])
+        empty.append(Gtk.Image(icon_name="video-display-symbolic", pixel_size=56))
+        self.video_empty_label = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        empty.append(self.video_empty_label)
+        self.video_stack.add_named(empty, "bos")
+        if self.rplayer is not None:
+            self.video_stack.add_named(self.rplayer.widget, "video")
+            self.rplayer.on_change = self._on_rplayer_change
+        audio = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.CENTER,
+                        halign=Gtk.Align.CENTER, css_classes=["video-bos"])
+        audio.append(Gtk.Image(icon_name="audio-x-generic-symbolic", pixel_size=64))
+        self.video_audio_label = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER,
+                                           css_classes=["calan-baslik"])
+        audio.append(self.video_audio_label)
+        self.video_stack.add_named(audio, "muzik")
+        self.video_area.set_child(self.video_stack)
+
+        # alt çubuk: oynat/duraklat, sarma, ilerleme, ses, tam ekran
+        bar = Gtk.Box(spacing=6, css_classes=["video-cubugu"])
+
+        def vbtn(icon: str, tip: str, fn) -> Gtk.Button:
+            b = Gtk.Button(icon_name=icon, tooltip_text=tip, css_classes=["flat", "yuvarlak"])
+            b.connect("clicked", lambda _b: fn())
+            bar.append(b)
+            return b
+
+        self.v_play = vbtn("media-playback-pause-symbolic", "Oynat / Duraklat (Boşluk)", self._rp_toggle)
+        vbtn("media-seek-backward-symbolic", "10 sn geri (←)", lambda: self._rp_seek_rel(-SKIP_SECONDS))
+        vbtn("media-seek-forward-symbolic", "10 sn ileri (→)", lambda: self._rp_seek_rel(SKIP_SECONDS))
+        self.v_pos = Gtk.Label(label="0:00", width_chars=7, xalign=1, css_classes=["kucuk"])
+        self.v_dur = Gtk.Label(label="0:00", width_chars=7, xalign=0, css_classes=["kucuk"])
+        self.v_seek = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
+        self.v_seek.set_draw_value(False)
+        self.v_seek.set_hexpand(True)
+        self.v_seek.connect("change-value", self._rp_seek_drag)
+        self._v_seek_touch = 0.0
+        bar.append(self.v_pos)
+        bar.append(self.v_seek)
+        bar.append(self.v_dur)
+        bar.append(Gtk.Image(icon_name="audio-volume-high-symbolic"))
+        self.v_vol = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.v_vol.set_draw_value(False)
+        self.v_vol.set_size_request(100, -1)
+        self.v_vol.connect("change-value", self._rp_volume)
+        bar.append(self.v_vol)
+        self.v_full = vbtn("view-fullscreen-symbolic", "Tam ekran (F)", self.toggle_video_fullscreen)
+        self.video_bar = Gtk.Revealer(child=bar, reveal_child=True, valign=Gtk.Align.END,
+                                      transition_type=Gtk.RevealerTransitionType.CROSSFADE)
+        self.video_area.add_overlay(self.video_bar)
+        self._bar_hide_src = 0
+        self._rp_new = ""
+
+        click = Gtk.GestureClick()
+        click.connect("pressed", self._on_video_click)
+        self.video_area.add_controller(click)
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", lambda *_: self._show_video_bar())
+        self.video_area.add_controller(motion)
+        frame.append(self.video_area)
+        self._video_fs = False
+        self.connect("notify::fullscreened", self._on_fullscreened)
+        frame.set_visible(self.rplayer is not None and self.renderer.player is self.rplayer)
+        GLib.timeout_add(500, self._update_video_bar)
+        return frame
+
+    def _on_rplayer_change(self) -> None:
+        """Gömülü oynatıcıda yeni medya başladı/durdu: görünümü güncelle."""
+        p = self.rplayer
+        if p is None:
+            return
+        if p.has_media:
+            self.video_stack.set_visible_child_name("muzik" if p.is_audio else "video")
+            self.video_audio_label.set_text(p.title)
+            self.video_title.set_text(p.title or "Oynatıcı")
+            if not p.is_audio and self.renderer.running and self._rp_new != p.title:
+                self.tabs.set_visible_child_name("alici")  # gelen videoyu hemen göster
+            self._rp_new = p.title
+        else:
+            self._rp_new = ""
+            self.video_stack.set_visible_child_name("bos")
+            self.video_title.set_text("Oynatıcı")
+            if self._video_fs:
+                self.unfullscreen()
+        self._update_video_bar()
+
+    def _rp_active(self) -> bool:
+        return (self.rplayer is not None and self.renderer.player is self.rplayer
+                and self.rplayer.has_media)
+
+    def _update_video_bar(self) -> bool:
+        if self.rplayer is None:
+            return False
+        self.video_empty_label.set_text(
+            "Telefondan gönderilen video burada oynar." if self.renderer.running
+            else "Alıcı kapalı. Yukarıdaki \"Alıcıyı aç\" anahtarını aç.")
+        if not self._rp_active():
+            for w in (self.v_pos, self.v_dur):
+                w.set_text("0:00")
+            self.v_seek.set_value(0)
+            return True
+        m = self.rplayer.mpv
+        try:
+            pos, dur, paused, vol = m.time_pos, m.duration, m.pause, m.volume
+        except Exception:  # noqa: BLE001
+            return True
+        self.v_play.set_icon_name("media-playback-start-symbolic" if paused
+                                  else "media-playback-pause-symbolic")
+        if dur:
+            self.v_seek.set_range(0, dur)
+            self.v_dur.set_text(fmt_time(dur))
+        if pos is not None and time.monotonic() - self._v_seek_touch > 1.5:
+            self.v_seek.set_value(pos)
+            self.v_pos.set_text(fmt_time(pos))
+        if vol is not None:
+            self.v_vol.set_value(vol)
+        return True
+
+    def _rp_toggle(self) -> None:
+        if self._rp_active():
+            self.rplayer.toggle_pause()
+            self.renderer.events.changed()  # telefondaki uygulamaya hemen bildir
+            GLib.timeout_add(150, lambda: self._update_video_bar() and False)
+
+    def _rp_seek_rel(self, delta: float) -> None:
+        if self._rp_active():
+            self.rplayer.seek_relative(delta)
+
+    def _rp_seek_drag(self, _scale, _scroll, value: float) -> bool:
+        self._v_seek_touch = time.monotonic()
+        self.v_pos.set_text(fmt_time(value))
+        if self._rp_active():
+            self.rplayer.mpv.seek(value, "absolute")
+        return False
+
+    def _rp_volume(self, _scale, _scroll, value: float) -> bool:
+        if self.rplayer is not None:
+            level = int(max(0, min(100, value)))
+            self.rplayer.mpv.volume = level
+            self.renderer.volume = level
+            self.renderer.events.changed()
+        return False
+
+    def _on_video_click(self, _gesture: Gtk.GestureClick, n_press: int, _x, _y) -> None:
+        self._show_video_bar()
+        if n_press == 2:
+            self.toggle_video_fullscreen()
+
+    def toggle_video_fullscreen(self) -> None:
+        if self._video_fs:
+            self.unfullscreen()
+        elif self.rplayer is not None and self.renderer.player is self.rplayer:
+            self.tabs.set_visible_child_name("alici")
+            self._video_fs = True
+            self._apply_video_fs(True)
+            self.fullscreen()
+
+    def _on_fullscreened(self, *_args) -> None:
+        if not self.is_fullscreen() and self._video_fs:  # tam ekrandan çıkıldı (Esc, pencere yöneticisi)
+            self._video_fs = False
+            self._apply_video_fs(False)
+
+    def _apply_video_fs(self, on: bool) -> None:
+        """Tam ekranda sadece video görünür; çıkınca her şey yerine döner."""
+        titlebar = self.get_titlebar()
+        if titlebar is not None:
+            titlebar.set_visible(not on)
+        for w in (self.rcv_top, self.rcv_how, self.rcv_log_card, self.video_title):
+            w.set_visible(not on)
+        m = 0 if on else 12
+        for setter in (self.rcv_page.set_margin_top, self.rcv_page.set_margin_bottom,
+                       self.rcv_page.set_margin_start, self.rcv_page.set_margin_end):
+            setter(m)
+        if on:
+            self.rcv_video_card.remove_css_class("kart")
+            self.video_area.add_css_class("tam-ekran")
+            self._show_video_bar()
+        else:
+            self.rcv_video_card.add_css_class("kart")
+            self.video_area.remove_css_class("tam-ekran")
+            if self._bar_hide_src:
+                GLib.source_remove(self._bar_hide_src)
+                self._bar_hide_src = 0
+            self.video_bar.set_reveal_child(True)
+        self.v_full.set_icon_name("view-restore-symbolic" if on else "view-fullscreen-symbolic")
+        self.v_full.set_tooltip_text("Tam ekrandan çık (Esc)" if on else "Tam ekran (F)")
+
+    def _show_video_bar(self) -> None:
+        """Tam ekranda fare oynayınca çubuğu göster, 3 sn sonra gizle."""
+        self.video_bar.set_reveal_child(True)
+        if not self._video_fs:
+            return
+        if self._bar_hide_src:
+            GLib.source_remove(self._bar_hide_src)
+        self._bar_hide_src = GLib.timeout_add_seconds(3, self._hide_video_bar)
+
+    def _hide_video_bar(self) -> bool:
+        self._bar_hide_src = 0
+        if self._video_fs:
+            self.video_bar.set_reveal_child(False)
+        return False
+
+    # ---- alıcı sekmesindeyken tuşlar oynatıcıya gider ----
+    def _on_receiver_tab(self) -> bool:
+        return self.tabs.get_visible_child_name() == "alici" and self._rp_active()
+
+    def on_space(self):
+        if self._on_receiver_tab():
+            self._rp_toggle()
+        else:
+            self.toggle_play()
+
+    def on_arrow(self, delta: float):
+        if self._on_receiver_tab():
+            self._rp_seek_rel(delta)
+        else:
+            self.skip(delta)
+
+    def on_fullscreen_key(self):
+        if self.tabs.get_visible_child_name() != "alici" and not self._video_fs:
+            return False
+        if self.rplayer is None or self.renderer.player is not self.rplayer:
+            return False
+        self.toggle_video_fullscreen()
+        return True
+
+    def on_escape(self):
+        if not self._video_fs:
+            return False  # Esc başka yerde (açılır menü vb.) kullanılsın
+        self.unfullscreen()
+        return True
 
     # ---------------- 3. sekme: Ağda Gez (DMP) ----------------
     def _build_browse_tab(self) -> Gtk.Widget:
@@ -1225,6 +1522,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _update_receiver_info(self) -> bool:
         on = self.renderer.running
+        if self.rplayer is not None and hasattr(self, "video_empty_label"):
+            self._update_video_bar()
         self.rcv_state.set_text("● Açık" if on else "Kapalı")
         if on:
             self.rcv_state.add_css_class("acik-yazi")
@@ -1275,6 +1574,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def on_close(self, *_args) -> bool:
         self.renderer.stop()
+        if self.rplayer is not None:
+            self.rplayer.terminate()
+        if self._ext_player is not None:
+            self._ext_player.close()
         self.mserver.stop()
         self.cp.player.close()
         self.cp.cast.close()
@@ -1975,8 +2278,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _key(self, _widget, _args, fn) -> bool:
         if isinstance(self.get_focus(), (Gtk.Text, Gtk.Editable)):
             return False  # yazı kutusunda boşluk/silme tuşu yazıya gitsin
-        fn()
-        return True
+        return fn() is not False  # False dönen işlev tuşu kullanmadı demektir
 
     def on_drop(self, _target, value, _x, _y) -> bool:
         paths = [f.get_path() for f in value.get_files() if f.get_path()]

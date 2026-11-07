@@ -1,3 +1,4 @@
 async-upnp-client>=0.38
 pychromecast>=13
+mpv>=1.0  # python-mpv: alıcıda program içi oynatıcı (libmpv, mpv paketiyle gelir)
 # PyGObject / GTK4 sistem paketinden gelir.
