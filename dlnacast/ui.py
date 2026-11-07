@@ -20,6 +20,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
 from . import __version__  # noqa: E402
 from . import guncelleme  # noqa: E402
 from . import gomulu  # noqa: E402
+from . import donustur  # noqa: E402
 from . import kucukresim  # noqa: E402
 from .bridge import AsyncBridge, to_ui  # noqa: E402
 from .controlpoint import LOCAL_ID, LOCAL_PLAYER_ID, ControlPoint, DeviceInfo, Entry, PlayStatus  # noqa: E402
@@ -71,6 +72,9 @@ CSS = b"""
 .kart { border: 1px solid alpha(currentColor, 0.13); border-radius: 12px; padding: 14px 16px;
         background-color: alpha(currentColor, 0.02); }
 .kart-baslik { font-weight: bold; font-size: 1.05em; }
+.bolum-baslik { font-size: 0.85em; opacity: 0.7; }
+.etkin-kutu { border: 1px solid alpha(currentColor, 0.15); border-radius: 8px; padding: 10px 12px; }
+.etkin-baslik { font-size: 1.5em; font-weight: bold; }
 .ic-kutu { background-color: alpha(currentColor, 0.05); border-radius: 8px; padding: 10px 12px; }
 .cihazlar { background: transparent; }
 .cihazlar row { border-radius: 8px; }
@@ -505,6 +509,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._user_stopped = False  # kullanıcı Durdur'a bastı mı
         self._last_pos = 0.0
         self._last_dur = 0.0
+        self._tc_gen = 0
+        self._probe_cache: Dict[str, "donustur.Bilgi"] = {}
         self._play_t0 = 0.0
 
         self._state = ""  # seçili cihazın son bilinen oynatma durumu
@@ -529,6 +535,13 @@ class MainWindow(Gtk.ApplicationWindow):
                                    tooltip_text="Bir video bitince listedeki sıradaki video başlar")
         self.loop_switch = Gtk.Switch(active=self.config.get("dongu", False),
                                       tooltip_text="Liste (ya da tek video) bitince baştan başlar")
+        self._tc_ok = donustur.kullanilabilir()
+        self.tc_switch = Gtk.Switch(active=self._tc_ok and self.config.get("donustur", False),
+                                    sensitive=self._tc_ok,
+                                    tooltip_text="TV'nin açamadığı dosyaları ffmpeg ile anında uygun biçime çevirir. "
+                                                 "Chromecast için gerekirse kendiliğinden yapılır."
+                                    if self._tc_ok else "Kullanılamıyor: ffmpeg kurulu değil")
+        self._tc: Optional[dict] = None  # şu an dönüştürülerek çalan parça (sarma ve konum için)
         self.renderer_switch = Gtk.Switch(
             tooltip_text="Açıkken telefon ve bilgisayarlar bu bilgisayarı TV gibi görür; "
                          "gönderdikleri video/müzik burada oynar (DLNA renderer)")
@@ -596,6 +609,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.autonext.connect("notify::active", self.on_autonext)
         self.loop_switch.connect("notify::active", self.on_loop)
+        self.tc_switch.connect("notify::active", self.on_tc_switch)
         self.renderer_switch.connect("notify::active", self.on_renderer_switch)
         self.server_switch.connect("notify::active", self.on_server_switch)
         self.connect("close-request", self.on_close)
@@ -671,8 +685,7 @@ class MainWindow(Gtk.ApplicationWindow):
         pl_child.append(Gtk.Image(icon_name="view-list-symbolic"))
         pl_child.append(self.playlist_label)
         self.playlist_btn = Gtk.MenuButton(child=pl_child, tooltip_text="Sıradaki videolar",
-                                           popover=Gtk.Popover(child=pl_box))
-        top.append(self.playlist_btn)
+                                           popover=Gtk.Popover(child=pl_box), valign=Gtk.Align.CENTER)
         mbox.append(top)
 
         self.source_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
@@ -702,7 +715,11 @@ class MainWindow(Gtk.ApplicationWindow):
         mbox.append(self.source_stack)
 
         # Oynatma kartı
-        play, pbox = card("Oynatma")
+        play, pbox = card()
+        head = Gtk.Box(spacing=8)
+        head.append(Gtk.Label(label="Oynatma", xalign=0, hexpand=True, css_classes=["kart-baslik"]))
+        head.append(self.playlist_btn)
+        pbox.append(head)
         main = Gtk.Box(spacing=16)
         art = Gtk.Overlay(css_classes=["kare"], overflow=Gtk.Overflow.HIDDEN, valign=Gtk.Align.START)
         art.set_size_request(120, 120)
@@ -760,17 +777,24 @@ class MainWindow(Gtk.ApplicationWindow):
         right.append(btns)
         main.append(right)
         pbox.append(main)
-        pbox.append(Gtk.Separator(margin_top=4))
-        opts = Gtk.Box(spacing=28)
-        for label, icon, sw in (("Döngü", "media-playlist-repeat-symbolic", self.loop_switch),
-                                ("Sıradakine geç", "media-skip-forward-symbolic", self.autonext)):
-            o = Gtk.Box(spacing=8)
-            o.append(Gtk.Image(icon_name=icon))
-            o.append(Gtk.Label(label=label))
-            sw.set_valign(Gtk.Align.CENTER)
-            o.append(sw)
-            opts.append(o)
-        pbox.append(opts)
+
+        def options(title: str, rows) -> None:
+            pbox.append(Gtk.Separator(margin_top=4))
+            pbox.append(Gtk.Label(label=title, xalign=0, css_classes=["bolum-baslik"]))
+            box = Gtk.Box(spacing=28)
+            for label, icon, sw in rows:
+                o = Gtk.Box(spacing=8, tooltip_text=sw.get_tooltip_text())
+                o.append(Gtk.Image(icon_name=icon))
+                o.append(Gtk.Label(label=label))
+                sw.set_valign(Gtk.Align.CENTER)
+                o.append(sw)
+                box.append(o)
+            pbox.append(box)
+
+        options("Ortak seçenekler", (("Döngü", "media-playlist-repeat-symbolic", self.loop_switch),
+                                     ("Sıradakine geç", "media-skip-forward-symbolic", self.autonext)))
+        options("Gelişmiş seçenekler", (("Dönüştür (transcode)", "emblem-synchronizing-symbolic",
+                                         self.tc_switch),))
         st = Gtk.Label(xalign=0, ellipsize=3, css_classes=["soluk", "kucuk"])
         self.status_labels.append(st)
         pbox.append(st)
@@ -790,6 +814,14 @@ class MainWindow(Gtk.ApplicationWindow):
         dbox.append(Gtk.Label(label="TV listede yoksa açık ve aynı ağda olduğundan emin ol, "
                                     "sonra sağ üstteki yenile düğmesine bas.", xalign=0, wrap=True,
                               vexpand=True, valign=Gtk.Align.END, css_classes=["soluk", "kucuk"]))
+        active = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, css_classes=["etkin-kutu"])
+        active.append(Gtk.Label(label="Etkin cihaz", xalign=0, css_classes=["etkin-baslik"]))
+        arow = Gtk.Box(spacing=8)
+        arow.append(Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=12))
+        self.active_dev = Gtk.Label(label="Seçilmedi", xalign=0, ellipsize=3, hexpand=True)
+        arow.append(self.active_dev)
+        active.append(arow)
+        dbox.append(active)
 
         page = Gtk.Box(spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         page.append(page_scroll(left))
@@ -1362,6 +1394,7 @@ class MainWindow(Gtk.ApplicationWindow):
                                 ("Aranıyor…" if self._discovering else "Ağda cihaz bulunamadı"))
         target = self.selected_renderer()
         self.cast_dev.set_text(f"Cihaz: {target.name}" if target else "Sağdan bir cihaz seç")
+        self.active_dev.set_text(target.name if target else "Seçilmedi")
 
     def _update_cast_media(self) -> None:
         """Yayınla sekmesindeki Medya kartını ve oynatma listesini günceller."""
@@ -1503,6 +1536,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def on_loop(self, switch: Gtk.Switch, _pspec) -> None:
         self.config["dongu"] = switch.get_active()
+        save_config(self.config)
+
+    def on_tc_switch(self, switch: Gtk.Switch, _pspec) -> None:
+        self.config["donustur"] = switch.get_active()
         save_config(self.config)
 
     # ---- alıcı sekmesi ----
@@ -1955,7 +1992,19 @@ class MainWindow(Gtk.ApplicationWindow):
         for b in (self.next_btn, self.c_next):
             b.set_sensitive(has_next)
 
-    def start_item(self, idx: int) -> None:
+    def _tc_source(self, item: "QueueItem", target: DeviceInfo) -> Optional[str]:
+        """Dönüştürme gerekebilecekse ffmpeg'e verilecek kaynak; gerekmezse None."""
+        if not self._tc_ok or target.location == LOCAL_PLAYER_ID:
+            return None  # mpv her şeyi açar
+        if target.kind != "cast" and not self.tc_switch.get_active():
+            return None  # DLNA TV'de sadece anahtar açıksa
+        if item.path:
+            return item.path
+        if item.uri and item.uri.startswith(("http://", "https://")):
+            return item.uri
+        return None
+
+    def start_item(self, idx: int, start: float = 0.0) -> None:
         if not 0 <= idx < len(self.queue):
             return
         target = self.selected_renderer()
@@ -1963,7 +2012,13 @@ class MainWindow(Gtk.ApplicationWindow):
             self.set_status("Önce üstteki \"Şurada oynat\" düğmesinden bir cihaz seç.")
             return
         item = self.queue[idx]
-        if item.path and target.location == LOCAL_PLAYER_ID:
+        if start <= 0:  # sarmada eski bilgi kalsın; art arda sarmalar da yeniden başlatmaya gitsin
+            self._tc = None
+        self._tc_gen += 1
+        tc_src = self._tc_source(item, target)
+        if tc_src:
+            uri, mime = "", guess_mime(tc_src)  # asıl karar dosya incelenince (_play_transcoded)
+        elif item.path and target.location == LOCAL_PLAYER_ID:
             uri, mime = item.path, guess_mime(item.path)  # bu bilgisayarda: ağa açmaya gerek yok
         elif item.path:  # yerel dosya: şimdi ağa aç
             try:
@@ -1998,8 +2053,44 @@ class MainWindow(Gtk.ApplicationWindow):
         self._update_cast_media()
         self.cast_dev.set_text(f"Cihaz: {target.name}{where}")
         self.set_status(f"\"{item.title}\" → {target.name}")
+        if tc_src:
+            self.bridge.submit(self._play_transcoded(target, item, tc_src, idx, start, self._tc_gen),
+                               on_error=self.show_error)
+            return
         self.bridge.submit(self.cp.play(target.location, uri, mime, item.title),
                            on_error=self.show_error)
+
+    async def _play_transcoded(self, target: DeviceInfo, item: "QueueItem", src: str, idx: int,
+                               start: float, gen: int) -> None:
+        """asyncio thread'inde: dosyayı incele, gerekiyorsa ffmpeg'den geçirerek oynat."""
+        info = self._probe_cache.get(src)
+        if info is None:
+            info = await asyncio.to_thread(donustur.incele, src)
+            self._probe_cache[src] = info
+        hedef = donustur.CHROMECAST if target.kind == "cast" else donustur.DLNA
+        plan = donustur.planla(info, hedef)
+        meta = ""
+        if plan.yontem == donustur.DOGRUDAN:
+            uri = self.local.add_file(item.path) if item.path else item.uri
+            mime = guess_mime(item.path) if item.path else item.mime
+            tc = None
+        else:
+            uri = self.local.add_transcode(src, plan, start)
+            mime = plan.mime
+            if hedef == donustur.DLNA:
+                meta = donustur.didl(uri, mime, item.title)
+            tc = {"idx": idx, "start": start, "dur": info.sure, "how": plan.aciklama()}
+        if gen != self._tc_gen:
+            return  # incelerken kullanıcı başka parça seçti
+        to_ui(self._set_tc, tc, gen, item.title, target.name)
+        await self.cp.play(target.location, uri, mime, item.title, meta)
+
+    def _set_tc(self, tc: Optional[dict], gen: int, title: str, dev: str) -> None:
+        if gen != self._tc_gen:
+            return  # bu arada başka parça başlatıldı
+        self._tc = tc
+        if tc:
+            self.set_status(f"\"{title}\" → {dev} ({tc['how']} gönderiliyor)")
 
     def next_item(self) -> None:
         if self.queue_idx + 1 < len(self.queue):
@@ -2099,6 +2190,21 @@ class MainWindow(Gtk.ApplicationWindow):
         if target is not None:
             value = max(0.0, min(value, self._dur)) if self._dur > 0 else max(0.0, value)
             self._pos = value
+            if self._tc and self._tc["idx"] == self.queue_idx:
+                # Dönüştürülen yayında cihaz saramaz: ffmpeg'i o saniyeden yeniden başlat.
+                dur = self._dur
+                self.start_item(self.queue_idx, start=value)
+                if dur > 0:  # çubuk sıfırlanmasın, yeni konumda dursun
+                    self._dur = dur
+                    for sc in self.seek_scales:
+                        sc.set_range(0, dur)
+                        sc.set_sensitive(True)
+                    for lb in self.dur_labels:
+                        lb.set_text(fmt_time(dur))
+                self._pos = value
+                self._show_pos(value)
+                self._seek_touch = time.monotonic() + SETTLE_SECONDS
+                return False
             self.bridge.submit(self.cp.seek(target.location, value), on_error=self.show_error)
         return False
 
@@ -2160,6 +2266,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def on_status(self, st: PlayStatus) -> None:
         self._polling = False
+        if self._tc:  # cihaz, akışın başından itibaren sayar; gerçek konuma çevir
+            st = PlayStatus(st.position + self._tc["start"],
+                            self._tc["dur"] or (st.duration + self._tc["start"] if st.duration else 0.0),
+                            st.state, st.volume)
         self._set_state(st.state)
         settling = time.monotonic() - self._play_t0 < SETTLE_SECONDS
         stopped = st.state in ("STOPPED", "NO_MEDIA_PRESENT", "")

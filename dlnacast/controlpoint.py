@@ -245,7 +245,7 @@ class ControlPoint:
                 return entries
 
     async def play(self, renderer_location: str, uri: str,
-                   mime: Optional[str] = None, title: str = "") -> None:
+                   mime: Optional[str] = None, title: str = "", meta: str = "") -> None:
         if renderer_location == LOCAL_PLAYER_ID:
             check_local_uri(uri)
             await self.player.play(uri, mime, title)
@@ -260,7 +260,7 @@ class ControlPoint:
         for attempt in range(3):
             try:
                 await svc.action("SetAVTransportURI").async_call(
-                    InstanceID=0, CurrentURI=uri, CurrentURIMetaData=""
+                    InstanceID=0, CurrentURI=uri, CurrentURIMetaData=meta
                 )
                 break
             except Exception:  # noqa: BLE001

@@ -3,10 +3,20 @@ import mimetypes
 import os
 import secrets
 import socket
+import subprocess
 import threading
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, Optional
-from urllib.parse import quote
+from typing import Dict, List, Optional
+from urllib.parse import quote, urlsplit
+
+from . import donustur
+
+
+@dataclass
+class TranscodeJob:
+    args: List[str]  # ffmpeg komutu
+    mime: str
 
 
 _EXTRA_MIME = {
@@ -63,7 +73,57 @@ class _Handler(BaseHTTPRequestHandler):
             return self.server.files.get(parts[2])
         return None
 
+    def _serve_transcode(self, head: bool) -> bool:
+        """/t/<anahtar>/ad: ffmpeg çıktısını akıtır. Bu yol değilse False döner."""
+        parts = self.path.split("?")[0].split("/")
+        if len(parts) < 3 or parts[1] != "t":
+            return False
+        job = getattr(self.server, "transcodes", {}).get(parts[2])
+        if job is None:
+            self.send_error(404)
+            return True
+        # Uzunluk bilinmediği için ortadan başlayan istek karşılanamaz (sarma programdan yapılır).
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes=") and rng[6:].split("-")[0].strip() not in ("", "0"):
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */*")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", job.mime)
+        self.send_header("Connection", "close")
+        self.send_header("transferMode.dlna.org", "Streaming")
+        self.send_header("contentFeatures.dlna.org", donustur.DLNA_OZELLIK)
+        self._cors()
+        self.end_headers()
+        if head:
+            return True
+        try:
+            proc = subprocess.Popen(job.args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    stdin=subprocess.DEVNULL)
+        except OSError:
+            return True
+        try:
+            while True:
+                chunk = proc.stdout.read(64 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # cihaz bağlantıyı kapattı (durdur, sarma, sonraki parça)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            if proc.stdout:
+                proc.stdout.close()
+        return True
+
     def _serve(self, head: bool) -> None:
+        if self._serve_transcode(head):
+            return
         path = self._resolve()
         if not path or not os.path.isfile(path):
             self.send_error(404)
@@ -120,6 +180,7 @@ class LocalServer:
     def __init__(self) -> None:
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._files: Dict[str, str] = {}
+        self._transcodes: Dict[str, TranscodeJob] = {}
         self._ip = ""
 
     def start(self) -> None:
@@ -128,6 +189,7 @@ class LocalServer:
         self._httpd = ThreadingHTTPServer(("0.0.0.0", 0), _Handler)
         self._httpd.daemon_threads = True
         self._httpd.files = self._files
+        self._httpd.transcodes = self._transcodes
         self._ip = lan_ip()
         threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
 
@@ -142,3 +204,14 @@ class LocalServer:
         self._files[token] = path
         name = quote(os.path.basename(path))
         return f"http://{self._ip}:{self.port}/f/{token}/{name}"
+
+    def add_transcode(self, source: str, plan: "donustur.Plan", start: float = 0.0) -> str:
+        """Kaynağı ffmpeg'den geçirerek sunar; her GET isteği kendi ffmpeg'ini başlatır."""
+        self.start()
+        token = secrets.token_urlsafe(8)
+        self._transcodes[token] = TranscodeJob(donustur.komut(source, plan, start), plan.mime)
+        while len(self._transcodes) > 20:  # eski adresler birikmesin
+            self._transcodes.pop(next(iter(self._transcodes)))
+        ext = {"video/mpeg": ".ts", "video/mp4": ".mp4", "audio/mpeg": ".mp3"}.get(plan.mime, "")
+        base = os.path.splitext(os.path.basename(urlsplit(source).path or source))[0] or "medya"
+        return f"http://{self._ip}:{self.port}/t/{token}/{quote(base + ext)}"

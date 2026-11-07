@@ -1,5 +1,11 @@
 # Değişiklikler
 
+## 0.10.0
+- Dönüştürme (transcode): TV'nin açamadığı videolar (HEVC, 10-bit, MKV, DTS ses vb.) ffmpeg ile anında uygun biçime çevrilip gönderilir. Yayınla sekmesinde "Gelişmiş seçenekler" altındaki "Dönüştür" anahtarıyla açılır.
+- Chromecast'te uyumsuz dosyalar anahtar kapalıyken bile kendiliğinden dönüştürülür; uyumlu dosyalara dokunulmaz.
+- Görüntü zaten uygunsa sadece kabı değiştirilir, işlemci yorulmaz. Dönüştürülen videoda ileri/geri sarma da çalışır (kısa bir bekleme olur).
+- Yayınla sekmesi yenilendi: liste düğmesi Oynatma kartına taşındı, seçenekler "Ortak" ve "Gelişmiş" diye ayrıldı, sağ altta etkin cihaz görünür.
+
 ## 0.9.1
 - Alıcı sekmesinde oynatıcı büyüdü: "Nasıl kullanılır?" kutusu kaldırıldı, video kalan bütün alanı kaplar.
 - Tam ekran artık bozulmaz: telefondan art arda video ve fotoğraf gönderirken tam ekranda kalır, sıradakini bekler.
