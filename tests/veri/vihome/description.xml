@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+<specVersion>
+<major>1</major>
+<minor>0</minor>
+</specVersion>
+<device>
+<UDN>uuid:bb5e21ce-2222-11b2-f918-84a1b7d1bcee</UDN>
+<friendlyName>VihomeMediaServer</friendlyName>
+<deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>
+<manufacturer>Honor Device Co.,Ltd</manufacturer>
+<manufacturerURL>http://www.hihonor.com</manufacturerURL>
+<modelName>VihomeMediaServer</modelName>
+<modelNumber>1.1</modelNumber>
+<productVersionNumber>100</productVersionNumber>
+<modelURL>http://www.hihonor.com</modelURL>
+<productType>stb</productType>
+<serialNumber></serialNumber>
+<dlna:X_DLNADOC xmlns:dlna="urn:schemas-dlna-org:device-1-0">DMS-1.50</dlna:X_DLNADOC>
+<dlna:X_DLNACAP xmlns:dlna="urn:schemas-dlna-org:device-1-0">av-upload,image-upload,audio-upload</dlna:X_DLNACAP>
+<serviceList>
+<service>
+<serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>
+<serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>
+<controlURL>/upnp/service/ConnectionManager/Control</controlURL>
+<eventSubURL>/upnp/service/ConnectionManager/Event</eventSubURL>
+<SCPDURL>/upnp/service/cms.xml</SCPDURL>
+</service>
+<service>
+<serviceType>urn:schemas-upnp-org:service:ScheduledRecording:2</serviceType>
+<serviceId>urn:upnp-org:serviceId:ScheduledRecording</serviceId>
+<controlURL>/upnp/service/ScheduledRecording/Control</controlURL>
+<eventSubURL>/upnp/service/ScheduledRecording/Event</eventSubURL>
+<SCPDURL>/upnp/service/srs.xml</SCPDURL>
+</service>
+<service>
+<serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>
+<serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId>
+<controlURL>/upnp/service/ContentDirectory/cds_control</controlURL>
+<eventSubURL>/upnp/service/ContentDirectory/cds_event</eventSubURL>
+<SCPDURL>/upnp/service/cds.xml</SCPDURL>
+</service>
+</serviceList>
+</device>
+
+</root>

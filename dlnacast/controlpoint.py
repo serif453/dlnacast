@@ -1,6 +1,8 @@
 """UPnP/DLNA control point: cihaz keşfi, ContentDirectory gezintisi, renderer kontrolü."""
 import asyncio
+import dataclasses
 import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -9,6 +11,30 @@ from typing import Callable, Dict, List, Optional
 from async_upnp_client.aiohttp import AiohttpRequester
 from async_upnp_client.client_factory import UpnpFactory
 from async_upnp_client.search import async_search
+
+_XML_TEXT_PAD = re.compile(r">\s*([^<>]*?)\s*<")
+
+
+def tidy_xml(text: str) -> str:
+    """Etiket içindeki baştaki/sondaki boşlukları siler: '<a>\\n ad \\n</a>' -> '<a>ad</a>'."""
+    return _XML_TEXT_PAD.sub(r">\1<", text)
+
+
+class TidyRequester(AiohttpRequester):
+    """Cihaz açıklama dosyalarındaki (GET) gereksiz boşlukları temizler.
+
+    Bazı cihazlar (örn. Honor "VihomeMediaServer") adları satır sonlarıyla sarar;
+    async-upnp-client bunları kırpmadığı için cihazın tamamı reddediliyordu.
+    """
+
+    async def async_http_request(self, http_request):  # type: ignore[override]
+        resp = await super().async_http_request(http_request)
+        if http_request.method == "GET" and resp.body and "<" in resp.body:
+            try:
+                resp = dataclasses.replace(resp, body=tidy_xml(resp.body))
+            except TypeError:  # eski kütüphane sürümü: olduğu gibi bırak
+                pass
+        return resp
 
 from .cast import CastManager
 from .localplayer import LocalPlayer
@@ -131,7 +157,7 @@ class ControlPoint:
 
     def _ensure(self) -> None:
         if self._factory is None:  # aiohttp oturumu çalışan döngüde oluşmalı
-            self._factory = UpnpFactory(AiohttpRequester())
+            self._factory = UpnpFactory(TidyRequester())
 
     async def discover(self, on_found: Callable[[DeviceInfo], None], timeout: int = 5) -> int:
         self._ensure()

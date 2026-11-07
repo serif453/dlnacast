@@ -1,5 +1,8 @@
 # Değişiklikler
 
+## 0.8.1
+- Düzeltme: bazı telefon ve kutuların medya sunucusu (örn. Honor "VihomeMediaServer") "Ağda Gez" listesinde hiç çıkmıyordu; artık çıkıyor.
+
 ## 0.8.0
 - Yeni görünüm: üstte dört sekme var: Yayınla, Alıcı, Ağda Gez, Sunucu.
 - Yayınla: bir video ya da müzik seç (ya da internet adresi yapıştır), sağdan TV'yi seç, "Yayınla"ya bas. Ses −/+, Sessiz, Döngü ve "Sıradakine geç" burada.
