@@ -1,5 +1,11 @@
 # Değişiklikler
 
+## 0.8.0
+- Yeni görünüm: üstte dört sekme var: Yayınla, Alıcı, Ağda Gez, Sunucu.
+- Yayınla: bir video ya da müzik seç (ya da internet adresi yapıştır), sağdan TV'yi seç, "Yayınla"ya bas. Ses −/+, Sessiz, Döngü ve "Sıradakine geç" burada.
+- Alıcı ve Sunucu artık kendi sekmelerinde: açık mı kapalı mı, ağda hangi adla göründüğü ve son olaylar tek bakışta görülür.
+- Ağda Gez: ağdaki sunucularda ve bilgisayarındaki klasörlerde eskisi gibi küçük resimlerle gezersin.
+
 ## 0.7.0
 - Alıcı artık telefona anında haber verir: oynatma, duraklatma, durma, parçanın bitmesi ve ses değişikliği telefondaki uygulamada (BubbleUPnP, Kodi vb.) hemen görünür.
 - Telefon uygulamasının çubuğu ve düğmeleri bilgisayardaki oynatmayla daha uyumlu çalışır.

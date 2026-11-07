@@ -20,6 +20,9 @@ def load_config() -> dict:
     cfg.setdefault("renderer", False)  # alıcı açık mı (bir sonraki açılışta hatırlanır)
     cfg.setdefault("recent", [])  # son açılan klasörler (sol listede görünür)
     cfg.setdefault("autonext", True)  # video bitince sıradakine geç
+    cfg.setdefault("dongu", False)  # liste bitince baştan başla
+    cfg.setdefault("sunucu", True)  # klasör paylaşımı (DLNA sunucusu) açık mı
+    cfg.setdefault("sekme", "yayinla")  # en son açık sekme
     return cfg
 
 

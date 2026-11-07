@@ -202,6 +202,7 @@ class MediaServer:
             self._ssdp = None
         if self._httpd is not None:
             self._httpd.shutdown()
+            self._httpd.server_close()  # portu bırak (yeniden açılabilsin)
             self._httpd = None
 
     # ---- yol / kimlik ----
